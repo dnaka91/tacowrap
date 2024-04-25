@@ -1,0 +1,47 @@
+[package]
+name = "tacowrap"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[dependencies]
+aead = { version = "0.5.2", features = ["std"] }
+aes = { version = "0.8.4", features = ["zeroize"] }
+aes-gcm = { version = "0.10.3", features = ["std", "zeroize"] }
+aes-siv = { version = "0.7.0", features = ["std"] }
+anstream = "0.6.13"
+anstyle = "1.0.6"
+anyhow = "1.0.82"
+base64 = "0.22.0"
+bitflags = "2.5.0"
+block-padding = { version = "0.3.3", features = ["std"] }
+chacha20poly1305 = { version = "0.10.1", features = ["std"] }
+clap = { version = "4.5.4", features = ["derive", "wrap_help"] }
+ctrlc = { version = "3.4.4", features = ["termination"] }
+daemonize = "0.5.0"
+dialoguer = { version = "0.11.0", default-features = false, features = ["password"] }
+eme-mode = { version = "0.3.1", features = ["std", "zeroize"] }
+flume = { version = "0.11.0", default-features = false, features = ["select"] }
+fuser = { version = "0.14.0", features = ["abi-7-19"] }
+hkdf = { version = "0.12.4", features = ["std"] }
+libc = "0.2.153"
+log = { version = "0.4.21", features = ["release_max_level_info", "kv_std"] }
+rand = "0.8.5"
+rayon = "1.10.0"
+rustc-hash = "1.1.0"
+scrypt = "0.11.0"
+serde = { version = "1.0.198", features = ["derive"] }
+serde_json = "1.0.116"
+sha2 = "0.10.8"
+zeroize = { version = "1.7.0", features = ["derive", "serde", "std"] }
+
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[dev-dependencies]
+tempfile = "3.10.1"
+yare = "3.0.0"
