@@ -10,7 +10,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     bench::{DecryptReport, Tree},
-    cli::Cli, gocryptfs::DynCipher,
+    cli::Cli,
+    gocryptfs::DynCipher,
 };
 
 mod bench;

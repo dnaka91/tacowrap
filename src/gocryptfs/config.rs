@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, path::Path};
 
-use anyhow::Result;
+use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 
 /// Name of the config file, located in the root of an encrypted directory.
@@ -9,7 +9,9 @@ pub const CONFIG_NAME: &str = "gocryptfs.conf";
 /// Load the configuration from an encrypted directory.
 pub fn load(base_dir: &Path) -> Result<Config> {
     let cfg = std::fs::read(base_dir.join(CONFIG_NAME))?;
-    let cfg = serde_json::from_slice(&cfg)?;
+    let cfg = serde_json::from_slice::<Config>(&cfg)?;
+
+    cfg.validate()?;
 
     Ok(cfg)
 }
@@ -30,6 +32,84 @@ pub struct Config {
     pub feature_flags: BTreeSet<Flag>,
 }
 
+impl Config {
+    fn validate(&self) -> Result<()> {
+        let Self {
+            scrypt_object,
+            version,
+            feature_flags,
+            ..
+        } = self;
+
+        scrypt_object
+            .validate()
+            .context("invalid scrypt parameter")?;
+
+        ensure!(
+            *version == 2,
+            "unknown on-disk format {version} (only v2 supported)",
+        );
+
+        if feature_flags.contains(&Flag::XChaCha20Poly1305) {
+            ensure!(
+                !feature_flags.contains(&Flag::AesSiv),
+                "XChaCha20Poly1305 and AESSIV are mutually exclusive",
+            );
+            ensure!(
+                !feature_flags.contains(&Flag::GcmIv128),
+                "XChaCha20Poly1305 conflicts with GCMIV128",
+            );
+            ensure!(
+                feature_flags.contains(&Flag::Hkdf),
+                "XChaCha20Poly1305 requires HKDF",
+            );
+        } else if feature_flags.contains(&Flag::AesSiv) {
+            ensure!(
+                feature_flags.contains(&Flag::GcmIv128),
+                "AESSIV requires GCMIV128",
+            );
+        } else {
+            ensure!(
+                feature_flags.contains(&Flag::GcmIv128),
+                "AES-GCM requires GCMIV128",
+            );
+        }
+
+        // custom stuff
+
+        ensure!(
+            !feature_flags.contains(&Flag::PlaintextNames),
+            "plaintext file names not supported",
+        );
+        ensure!(
+            !feature_flags.contains(&Flag::Fido2),
+            "FIDO2 passwords not supported",
+        );
+        ensure!(
+            !feature_flags.contains(&Flag::LongNameMax),
+            "custom name length limit not supported",
+        );
+        ensure!(
+            feature_flags.contains(&Flag::DirIv),
+            "directory IV required",
+        );
+        ensure!(
+            feature_flags.contains(&Flag::EmeNames),
+            "EME encrypted names required",
+        );
+        ensure!(
+            feature_flags.contains(&Flag::LongNames),
+            "long name flag required",
+        );
+        ensure!(
+            feature_flags.contains(&Flag::Raw64),
+            "raw Base64 encoding flag required",
+        );
+
+        Ok(())
+    }
+}
+
 /// Parameters for key derivation using _Scrypt_.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -45,6 +125,17 @@ pub struct ScryptKdf {
     pub p: u32,
     /// Output key length.
     pub key_len: usize,
+}
+
+impl ScryptKdf {
+    fn validate(&self) -> Result<()> {
+        ensure!(self.salt.len() >= 32, "salt is too short");
+        ensure!(self.n.trailing_zeros() >= 10, "parameter N is too small");
+        ensure!(self.r >= 8, "parameter R is too small");
+        ensure!(self.p >= 1, "parameter P is too small");
+        ensure!(self.key_len >= 32, "key length is too small");
+        Ok(())
+    }
 }
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize)]

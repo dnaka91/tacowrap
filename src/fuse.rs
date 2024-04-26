@@ -4,7 +4,7 @@ use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
     fs::File,
-    io::Read,
+    io::{Read, Write},
     os::unix::prelude::*,
     path::{Path, PathBuf},
     time::Duration,
@@ -32,6 +32,7 @@ pub struct Fuse {
     cipher: DynCipher,
     dirs: FxHashMap<u64, FuseDir>,
     files: FxHashMap<u64, FuseFile>,
+    handles: FxHashMap<u64, File>,
     shutdown: Option<flume::Sender<()>>,
 }
 
@@ -192,6 +193,7 @@ impl Fuse {
             cipher,
             dirs,
             files,
+            handles: FxHashMap::default(),
             shutdown: None,
         })
     }
@@ -324,6 +326,20 @@ impl Fuse {
         Ok(entry)
     }
 
+    #[allow(clippy::cast_sign_loss)]
+    fn open_wrapper(&mut self, ino: u64) -> Result<Option<u64>> {
+        let Some(file) = self.files.get(&ino) else {
+            return Ok(None);
+        };
+
+        let file = File::open(&file.path).context("failed opening file")?;
+
+        let fd = file.as_raw_fd() as u64;
+        self.handles.insert(ino, file);
+
+        Ok(Some(fd))
+    }
+
     #[allow(clippy::cast_precision_loss)]
     fn read_wrapper(&mut self, ino: u64, offset: usize, size: usize) -> Result<Option<Vec<u8>>> {
         let Some(file) = self.files.get(&ino) else {
@@ -344,12 +360,7 @@ impl Fuse {
 
         let plain = self
             .cipher
-            .decrypt(
-                &self.master_key,
-                &file.head,
-                &content,
-                offset / block_size,
-            )
+            .decrypt(&self.master_key, &file.head, &content, offset / block_size)
             .context("failed decrypting content")?;
 
         Ok(Some(plain))
@@ -553,8 +564,17 @@ impl fuser::Filesystem for Fuse {
     }
 
     fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
-        debug!(ino, flags:? = OpenFlags::from_bits_truncate(flags); "open");
-        reply.opened(0, 0);
+        let flags = OpenFlags::from_bits_truncate(flags);
+        debug!(ino, flags:?; "open");
+
+        match self.open_wrapper(ino) {
+            Ok(Some(fd)) => reply.opened(fd, flags.bits() as u32),
+            Ok(None) => reply.error(libc::ENOENT),
+            Err(e) => {
+                error!(error:err = *e; "open failed");
+                reply.error(libc::EIO);
+            }
+        }
     }
 
     fn read(
@@ -606,10 +626,13 @@ impl fuser::Filesystem for Fuse {
     ) {
         debug!(ino, fh, lock_owner; "flush");
 
-        if self.dirs.contains_key(&ino) || self.files.contains_key(&ino) {
-            reply.ok();
-        } else {
-            reply.error(libc::ENOENT);
+        match self.handles.get_mut(&ino).map(Write::flush).transpose() {
+            Ok(Some(())) => reply.ok(),
+            Ok(None) => reply.error(libc::ENOENT),
+            Err(e) => {
+                error!(error:err = e; "flush failed");
+                reply.error(libc::EIO);
+            }
         }
     }
 
@@ -624,7 +647,18 @@ impl fuser::Filesystem for Fuse {
         reply: fuser::ReplyEmpty,
     ) {
         debug!(ino, fh, flags:? = OpenFlags::from_bits_truncate(flags), lock_owner, flush; "release");
-        reply.ok();
+
+        match self.handles.remove(&ino) {
+            Some(mut handle) if flush => match handle.flush() {
+                Ok(()) => reply.ok(),
+                Err(e) => {
+                    error!(error:err = e; "release flush failed");
+                    reply.error(libc::EIO);
+                }
+            },
+            Some(_) => reply.ok(),
+            None => reply.error(libc::ENOENT),
+        }
     }
 
     fn fsync(
@@ -882,7 +916,7 @@ impl fuser::Filesystem for Fuse {
 }
 
 bitflags! {
-    #[derive(Debug)]
+    #[derive(Clone, Copy, Debug)]
     struct OpenFlags: i32 {
         /// Open as read-only, mutually exclusive with [`Self::WRONLY`] and [`Self::RDWR`].
         const RDONLY = libc::O_RDONLY;
@@ -914,7 +948,7 @@ bitflags! {
 
 bitflags! {
     /// File mode flags that define access rights as well as special bits.
-    #[derive(Debug)]
+    #[derive(Clone, Copy, Debug)]
     #[cfg_attr(test, derive(PartialEq))]
     struct Mode: u32 {
         /// User (file owner) has read, write, and execute permission.
