@@ -15,9 +15,12 @@ use bitflags::bitflags;
 use fuser::FileAttr;
 use libc::c_int;
 use log::{debug, error, warn};
-use nix::sys::{
-    stat::{FchmodatFlags, UtimensatFlags},
-    time::TimeSpec,
+use nix::{
+    errno::Errno,
+    sys::{
+        stat::{FchmodatFlags, UtimensatFlags},
+        time::TimeSpec,
+    },
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -233,6 +236,32 @@ impl Fuse {
         Ok((dirs, files, children))
     }
 
+    fn find_dir(&self, parent: u64, name: &OsStr) -> Option<&FuseDir> {
+        let parent = self.dirs.get(&parent)?;
+        parent.children.iter().find_map(|c| {
+            let dir = self.dirs.get(c)?;
+            (dir.name == name).then_some(dir)
+        })
+    }
+
+    fn find_file(&self, parent: u64, name: &OsStr) -> Option<&FuseFile> {
+        let parent = self.dirs.get(&parent)?;
+        parent.children.iter().find_map(|c| {
+            let file = self.files.get(c)?;
+            (file.name == name).then_some(file)
+        })
+    }
+
+    fn exists(&self, parent: u64, name: &OsStr) -> bool {
+        let Some(parent) = self.dirs.get(&parent) else {
+            return false;
+        };
+        parent.children.iter().any(|c| {
+            self.dirs.get(c).is_some_and(|d| d.name == name)
+                || self.files.get(c).is_some_and(|f| f.name == name)
+        })
+    }
+
     fn lookup_wrapper(&mut self, parent: u64, name: &OsStr) -> Result<Option<&FileAttr>> {
         let Some(dir) = self.dirs.get(&parent) else {
             return Ok(None);
@@ -356,25 +385,71 @@ impl Fuse {
     }
 
     fn rmdir_wrapper(&mut self, parent: u64, name: &OsStr) -> Result<Option<()>> {
-        let Some(parent) = self.dirs.get(&parent) else {
-            return Ok(None);
-        };
-
-        let Some(entry) = parent.children.iter().find_map(|c| {
-            let dir = self.dirs.get(c)?;
-            (dir.name == name).then_some(dir)
-        }) else {
+        let Some(entry) = self.find_dir(parent, name) else {
             return Ok(None);
         };
 
         fs::remove_dir_all(&entry.path).context("failed removing directory")?;
 
-        let parent = parent.attr.ino;
         let entry = entry.attr.ino;
         self.dirs.get_mut(&parent).unwrap().children.remove(&entry);
-        self.dirs.remove(&entry);
+
+        let entry = self.dirs.remove(&entry).unwrap();
+        for child in entry.children {
+            self.dirs.remove(&child);
+            self.files.remove(&child);
+        }
 
         Ok(Some(()))
+    }
+
+    fn rename_wrapper(
+        &mut self,
+        parent: u64,
+        name: &OsStr,
+        new_parent: u64,
+        new_name: &OsStr,
+    ) -> Result<Option<()>> {
+        if self.exists(new_parent, new_name) {
+            return Err(Errno::EEXIST.into());
+        }
+
+        let Some(new_iv) = self.dirs.get(&parent).map(|p| p.iv) else {
+            return Ok(None);
+        };
+
+        if let Some(dir) = self
+            .find_dir(parent, name)
+            .map(|dir| dir.attr.ino)
+            .and_then(|ino| self.dirs.get_mut(&ino))
+        {
+            let crypt_new_name = gocryptfs::names::encrypt(&self.master_key, &new_iv, new_name)
+                .context("failed encrypting new name")?;
+            let new_path = dir.path.with_file_name(crypt_new_name);
+
+            fs::rename(&dir.path, &new_path).context("failed renaming directory")?;
+            dir.path = new_path;
+            dir.name = new_name.to_owned();
+
+            Ok(Some(()))
+        } else if let Some(file) = self
+            .find_file(parent, name)
+            .map(|file| file.attr.ino)
+            .and_then(|ino| self.files.get_mut(&ino))
+        {
+            let crypt_new_name = gocryptfs::names::encrypt(&self.master_key, &new_iv, new_name)
+                .context("failed encrypting new name")?;
+            let new_path = file.path.with_file_name(crypt_new_name);
+
+            fs::rename(&file.path, &new_path).context("failed renaming file")?;
+            file.parent = new_parent;
+            file.path = new_path;
+            file.name = new_name.to_owned();
+
+            Ok(Some(()))
+        } else {
+            Ok(None)
+        }
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -625,7 +700,19 @@ impl fuser::Filesystem for Fuse {
         reply: fuser::ReplyEmpty,
     ) {
         debug!(parent, name:?, newparent, newname:?, flags; "rename");
-        reply.error(libc::ENOSYS);
+
+        match self.rename_wrapper(parent, name, newparent, newname) {
+            Ok(Some(())) => reply.ok(),
+            Ok(None) => reply.error(libc::ENOENT),
+            Err(e) => {
+                error!(error:err = *e; "rename failed");
+                reply.error(
+                    e.downcast::<Errno>()
+                        .map(|e| e as c_int)
+                        .unwrap_or(libc::EIO),
+                );
+            }
+        }
     }
 
     fn link(
