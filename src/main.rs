@@ -86,7 +86,6 @@ fn main() -> Result<()> {
             let mut options = vec![
                 MountOption::FSName(fs_name.clone()),
                 MountOption::Subtype("tacowrap".to_owned()),
-                MountOption::RO,
                 MountOption::NoDev,
                 MountOption::NoSuid,
             ];

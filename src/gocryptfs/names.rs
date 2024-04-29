@@ -12,6 +12,7 @@ use base64::prelude::*;
 use block_padding::Pkcs7;
 use eme_mode::DynamicEme;
 use hkdf::Hkdf;
+use rand::Rng;
 use sha2::Sha256;
 
 use super::MasterKey;
@@ -30,6 +31,12 @@ pub fn load_iv(dir: &Path) -> Result<Iv> {
     Ok(iv)
 }
 
+pub fn create_iv() -> Iv {
+    let mut iv = Iv::default();
+    rand::thread_rng().fill(iv.as_mut_slice());
+    iv
+}
+
 pub fn decrypt(master_key: &MasterKey, iv: &Iv, name: &OsStr) -> Result<OsString> {
     let key = derive_key(master_key)?;
     let eme = DynamicEme::<Aes256>::new(&key, iv);
@@ -41,7 +48,6 @@ pub fn decrypt(master_key: &MasterKey, iv: &Iv, name: &OsStr) -> Result<OsString
     Ok(plain.to_owned())
 }
 
-#[allow(dead_code)]
 pub fn encrypt(master_key: &MasterKey, iv: &Iv, name: &OsStr) -> Result<OsString> {
     let key = derive_key(master_key)?;
     let mut eme = DynamicEme::<Aes256>::new(&key, iv);

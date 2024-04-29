@@ -3,18 +3,22 @@
 use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
-    fs::File,
+    fs::{self, File, Metadata},
     io::{Read, Write},
     os::unix::prelude::*,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context, Result};
 use bitflags::bitflags;
 use fuser::FileAttr;
 use libc::c_int;
-use log::{debug, error};
+use log::{debug, error, warn};
+use nix::sys::{
+    stat::{FchmodatFlags, UtimensatFlags},
+    time::TimeSpec,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::gocryptfs::{
@@ -102,23 +106,7 @@ impl Fuse {
                     FuseDir {
                         path,
                         name,
-                        attr: FileAttr {
-                            ino: meta.ino(),
-                            size: 0,
-                            blocks: 0,
-                            atime: meta.accessed()?,
-                            mtime: meta.modified()?,
-                            ctime: meta.created()?,
-                            crtime: meta.created()?,
-                            kind: fuser::FileType::Directory,
-                            perm: meta.mode().try_into()?,
-                            nlink: meta.nlink().try_into()?,
-                            uid: meta.uid(),
-                            gid: meta.gid(),
-                            rdev: 0,
-                            blksize: 512,
-                            flags: 0,
-                        },
+                        attr: dir_attr(&meta)?,
                         children: FxHashSet::default(),
                         iv,
                     },
@@ -136,23 +124,7 @@ impl Fuse {
                         parent: fuser::FUSE_ROOT_ID,
                         path,
                         name,
-                        attr: FileAttr {
-                            ino: meta.ino(),
-                            size,
-                            blocks,
-                            atime: meta.accessed()?,
-                            mtime: meta.modified()?,
-                            ctime: meta.created()?,
-                            crtime: meta.created()?,
-                            kind: fuser::FileType::RegularFile,
-                            perm: meta.mode().try_into()?,
-                            nlink: meta.nlink().try_into()?,
-                            uid: meta.uid(),
-                            gid: meta.gid(),
-                            rdev: 0,
-                            blksize: BLOCK_SIZE as u32,
-                            flags: 0,
-                        },
+                        attr: file_attr(&meta, size, blocks)?,
                         head,
                     },
                 );
@@ -232,23 +204,7 @@ impl Fuse {
                     FuseDir {
                         path,
                         name,
-                        attr: FileAttr {
-                            ino: meta.ino(),
-                            size: 0,
-                            blocks: 0,
-                            atime: meta.accessed()?,
-                            mtime: meta.modified()?,
-                            ctime: meta.created()?,
-                            crtime: meta.created()?,
-                            kind: fuser::FileType::Directory,
-                            perm: meta.mode().try_into()?,
-                            nlink: meta.nlink().try_into()?,
-                            uid: meta.uid(),
-                            gid: meta.gid(),
-                            rdev: 0,
-                            blksize: 512,
-                            flags: 0,
-                        },
+                        attr: dir_attr(&meta)?,
                         children: FxHashSet::default(),
                         iv,
                     },
@@ -266,23 +222,7 @@ impl Fuse {
                         parent: fuser::FUSE_ROOT_ID,
                         path,
                         name,
-                        attr: FileAttr {
-                            ino: meta.ino(),
-                            size,
-                            blocks,
-                            atime: meta.accessed()?,
-                            mtime: meta.modified()?,
-                            ctime: meta.created()?,
-                            crtime: meta.created()?,
-                            kind: fuser::FileType::RegularFile,
-                            perm: meta.mode().try_into()?,
-                            nlink: meta.nlink().try_into()?,
-                            uid: meta.uid(),
-                            gid: meta.gid(),
-                            rdev: 0,
-                            blksize: BLOCK_SIZE as u32,
-                            flags: 0,
-                        },
+                        attr: file_attr(&meta, size, blocks)?,
                         head,
                     },
                 );
@@ -292,9 +232,7 @@ impl Fuse {
 
         Ok((dirs, files, children))
     }
-}
 
-impl Fuse {
     fn lookup_wrapper(&mut self, parent: u64, name: &OsStr) -> Result<Option<&FileAttr>> {
         let Some(dir) = self.dirs.get(&parent) else {
             return Ok(None);
@@ -324,6 +262,119 @@ impl Fuse {
             });
 
         Ok(entry)
+    }
+
+    #[allow(clippy::similar_names, clippy::too_many_arguments)]
+    fn setattr_wrapper(
+        &mut self,
+        ino: u64,
+        mode: Option<Mode>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+    ) -> Result<Option<FileAttr>> {
+        let Some((path, attr)) = self
+            .files
+            .get_mut(&ino)
+            .map(|f| (&f.path, &mut f.attr))
+            .or_else(|| self.dirs.get_mut(&ino).map(|d| (&d.path, &mut d.attr)))
+        else {
+            return Ok(None);
+        };
+
+        if let Some(mode) = mode {
+            nix::sys::stat::fchmodat(
+                None,
+                path,
+                nix::sys::stat::Mode::from_bits_truncate(mode.bits()),
+                FchmodatFlags::NoFollowSymlink,
+            )
+            .context("failed changing file mode")?;
+        }
+
+        if uid.is_some() || gid.is_some() {
+            nix::unistd::chown(path, uid.map(Into::into), gid.map(Into::into))
+                .context("failed changing file owner")?;
+        }
+
+        if let Some(_size) = size {
+            // TODO: last block needs to be re-encrypted after truncation
+            // nix::unistd::truncate(&entry.path, size as libc::off_t).unwrap();
+            warn!("size changes not supported");
+        }
+
+        if atime.is_some() || mtime.is_some() {
+            nix::sys::stat::utimensat(
+                None,
+                path,
+                &convert_time_spec(atime),
+                &convert_time_spec(mtime),
+                UtimensatFlags::NoFollowSymlink,
+            )
+            .context("failed changing file times")?;
+        }
+
+        *attr = file_attr(&path.metadata().unwrap(), attr.size, attr.blocks)
+            .context("failed getting fresh file metadata")?;
+
+        Ok(Some(*attr))
+    }
+
+    fn mkdir_wrapper(&mut self, parent: u64, name: &OsStr, mode: Mode) -> Result<Option<FileAttr>> {
+        let Some(parent) = self.dirs.get_mut(&parent) else {
+            return Ok(None);
+        };
+
+        let crypt_name = gocryptfs::names::encrypt(&self.master_key, &parent.iv, name)
+            .context("failed encrypting dir name")?;
+        let path = parent.path.join(crypt_name);
+
+        nix::unistd::mkdir(&path, nix::sys::stat::Mode::from_bits_truncate(mode.bits()))
+            .context("failed creating directory")?;
+
+        let dir_iv = gocryptfs::names::create_iv();
+
+        std::fs::write(path.join(gocryptfs::names::DIRIV_NAME), dir_iv)
+            .context("failed writing dir IV")?;
+
+        let attr = dir_attr(&path.metadata().context("failed loading dir metadata")?)?;
+        parent.children.insert(attr.ino);
+        self.dirs.insert(
+            attr.ino,
+            FuseDir {
+                path,
+                name: name.to_owned(),
+                attr,
+                children: FxHashSet::default(),
+                iv: dir_iv,
+            },
+        );
+
+        Ok(Some(attr))
+    }
+
+    fn rmdir_wrapper(&mut self, parent: u64, name: &OsStr) -> Result<Option<()>> {
+        let Some(parent) = self.dirs.get(&parent) else {
+            return Ok(None);
+        };
+
+        let Some(entry) = parent.children.iter().find_map(|c| {
+            let dir = self.dirs.get(c)?;
+            (dir.name == name).then_some(dir)
+        }) else {
+            return Ok(None);
+        };
+
+        fs::remove_dir_all(&entry.path).context("failed removing directory")?;
+
+        let parent = parent.attr.ino;
+        let entry = entry.attr.ino;
+        self.dirs.get_mut(&parent).unwrap().children.remove(&entry);
+        self.dirs.remove(&entry);
+
+        Ok(Some(()))
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -467,8 +518,17 @@ impl fuser::Filesystem for Fuse {
         _flags: Option<u32>,
         reply: fuser::ReplyAttr,
     ) {
-        debug!(ino, mode:? = mode.map(Mode::from_bits_truncate), uid, gid, size, atime:?, mtime:?, ctime:?, fh; "setattr");
-        reply.error(libc::ENOSYS);
+        let mode = mode.map(Mode::from_bits_truncate);
+        debug!(ino, mode:?, uid, gid, size, atime:?, mtime:?, ctime:?, fh; "setattr");
+
+        match self.setattr_wrapper(ino, mode, uid, gid, size, atime, mtime) {
+            Ok(Some(attr)) => reply.attr(&TTL, &attr),
+            Ok(None) => reply.error(libc::ENOENT),
+            Err(e) => {
+                error!(error:err = *e; "setattr failed");
+                reply.error(libc::EIO);
+            }
+        }
     }
 
     fn readlink(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyData) {
@@ -499,8 +559,17 @@ impl fuser::Filesystem for Fuse {
         umask: u32,
         reply: fuser::ReplyEntry,
     ) {
-        debug!(parent, name:?, mode:? = Mode::from_bits_truncate(mode), umask; "mkdir");
-        reply.error(libc::ENOSYS);
+        let mode = Mode::from_bits_truncate(mode);
+        debug!(parent, name:?, mode:?, umask; "mkdir");
+
+        match self.mkdir_wrapper(parent, name, mode) {
+            Ok(Some(attr)) => reply.entry(&TTL, &attr, 0),
+            Ok(None) => reply.error(libc::ENOENT),
+            Err(e) => {
+                error!(error:err = *e; "mkdir failed");
+                reply.error(libc::EIO);
+            }
+        }
     }
 
     fn unlink(
@@ -522,7 +591,15 @@ impl fuser::Filesystem for Fuse {
         reply: fuser::ReplyEmpty,
     ) {
         debug!(parent, name:?; "rmdir");
-        reply.error(libc::ENOSYS);
+
+        match self.rmdir_wrapper(parent, name) {
+            Ok(Some(())) => reply.ok(),
+            Ok(None) => reply.error(libc::ENOENT),
+            Err(e) => {
+                error!(error:err = *e; "rmdir failed");
+                reply.error(libc::EIO);
+            }
+        }
     }
 
     fn symlink(
@@ -984,6 +1061,56 @@ bitflags! {
         const SET_GID = libc::S_ISGID;
         /// Sticky bit.
         const STICKY = libc::S_ISVTX;
+    }
+}
+
+fn dir_attr(meta: &Metadata) -> Result<FileAttr> {
+    Ok(FileAttr {
+        ino: meta.ino(),
+        size: 0,
+        blocks: 0,
+        atime: meta.accessed()?,
+        mtime: meta.modified()?,
+        ctime: meta.created()?,
+        crtime: meta.created()?,
+        kind: fuser::FileType::Directory,
+        perm: meta.mode().try_into()?,
+        nlink: meta.nlink().try_into()?,
+        uid: meta.uid(),
+        gid: meta.gid(),
+        rdev: 0,
+        blksize: 512,
+        flags: 0,
+    })
+}
+
+fn file_attr(meta: &Metadata, size: u64, blocks: u64) -> Result<FileAttr> {
+    Ok(FileAttr {
+        ino: meta.ino(),
+        size,
+        blocks,
+        atime: meta.accessed()?,
+        mtime: meta.modified()?,
+        ctime: meta.created()?,
+        crtime: meta.created()?,
+        kind: fuser::FileType::RegularFile,
+        perm: meta.mode().try_into()?,
+        nlink: meta.nlink().try_into()?,
+        uid: meta.uid(),
+        gid: meta.gid(),
+        rdev: 0,
+        blksize: BLOCK_SIZE as u32,
+        flags: 0,
+    })
+}
+
+fn convert_time_spec(time: Option<fuser::TimeOrNow>) -> TimeSpec {
+    match time {
+        Some(fuser::TimeOrNow::Now) => TimeSpec::UTIME_NOW,
+        Some(fuser::TimeOrNow::SpecificTime(t)) => {
+            TimeSpec::from_duration(t.duration_since(SystemTime::UNIX_EPOCH).unwrap())
+        }
+        None => TimeSpec::UTIME_OMIT,
     }
 }
 
