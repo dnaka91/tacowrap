@@ -195,6 +195,26 @@ impl DynCipher {
             }
         }
     }
+
+    pub fn encrypt(
+        &self,
+        master_key: &MasterKey,
+        header: &content::FileHeader,
+        data: &[u8],
+        block_offset: usize,
+    ) -> Result<Vec<u8>> {
+        match self {
+            Self::AesGcm => {
+                content::encrypt::<AesGcmCipher>(master_key, header, data, block_offset)
+            }
+            Self::AesSiv => {
+                content::encrypt::<AesSivCipher>(master_key, header, data, block_offset)
+            }
+            Self::XChaCha20 => {
+                content::encrypt::<XChaCha20Cipher>(master_key, header, data, block_offset)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

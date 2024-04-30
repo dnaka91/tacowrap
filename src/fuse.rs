@@ -10,11 +10,11 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use bitflags::bitflags;
 use fuser::FileAttr;
 use libc::c_int;
-use log::{debug, error, warn};
+use log::{debug, error, trace, warn};
 use nix::{
     errno::Errno,
     sys::{
@@ -252,16 +252,6 @@ impl Fuse {
         })
     }
 
-    fn exists(&self, parent: u64, name: &OsStr) -> bool {
-        let Some(parent) = self.dirs.get(&parent) else {
-            return false;
-        };
-        parent.children.iter().any(|c| {
-            self.dirs.get(c).is_some_and(|d| d.name == name)
-                || self.files.get(c).is_some_and(|f| f.name == name)
-        })
-    }
-
     fn lookup_wrapper(&mut self, parent: u64, name: &OsStr) -> Result<Option<&FileAttr>> {
         let Some(dir) = self.dirs.get(&parent) else {
             return Ok(None);
@@ -293,7 +283,11 @@ impl Fuse {
         Ok(entry)
     }
 
-    #[allow(clippy::similar_names, clippy::too_many_arguments)]
+    #[allow(
+        clippy::cast_possible_wrap,
+        clippy::similar_names,
+        clippy::too_many_arguments
+    )]
     fn setattr_wrapper(
         &mut self,
         ino: u64,
@@ -328,10 +322,15 @@ impl Fuse {
                 .context("failed changing file owner")?;
         }
 
-        if let Some(_size) = size {
-            // TODO: last block needs to be re-encrypted after truncation
-            // nix::unistd::truncate(&entry.path, size as libc::off_t).unwrap();
-            warn!("size changes not supported");
+        if let Some(size) = size {
+            if size == 0 {
+                nix::unistd::truncate(path, FileHeader::LEN as libc::off_t)
+                    .context("failed truncating file")?;
+            } else {
+                // TODO: last block needs to be re-encrypted after truncation
+                // nix::unistd::truncate(&entry.path, size as libc::off_t).unwrap();
+                warn!("size changes not supported");
+            }
         }
 
         if atime.is_some() || mtime.is_some() {
@@ -384,12 +383,26 @@ impl Fuse {
         Ok(Some(attr))
     }
 
+    fn unlink_wrapper(&mut self, parent: u64, name: &OsStr) -> Result<Option<()>> {
+        let Some(entry) = self.find_file(parent, name) else {
+            return Ok(None);
+        };
+
+        fs::remove_file(&entry.path).context("failed removing file")?;
+
+        let entry = entry.attr.ino;
+        self.dirs.get_mut(&parent).unwrap().children.remove(&entry);
+        self.files.remove(&entry);
+
+        Ok(Some(()))
+    }
+
     fn rmdir_wrapper(&mut self, parent: u64, name: &OsStr) -> Result<Option<()>> {
         let Some(entry) = self.find_dir(parent, name) else {
             return Ok(None);
         };
 
-        fs::remove_dir_all(&entry.path).context("failed removing directory")?;
+        fs::remove_dir(&entry.path).context("failed removing directory")?;
 
         let entry = entry.attr.ino;
         self.dirs.get_mut(&parent).unwrap().children.remove(&entry);
@@ -410,15 +423,11 @@ impl Fuse {
         new_parent: u64,
         new_name: &OsStr,
     ) -> Result<Option<()>> {
-        if self.exists(new_parent, new_name) {
-            return Err(Errno::EEXIST.into());
-        }
-
-        let Some(new_iv) = self.dirs.get(&parent).map(|p| p.iv) else {
+        let Some(new_iv) = self.dirs.get(&new_parent).map(|p| p.iv) else {
             return Ok(None);
         };
 
-        if let Some(dir) = self
+        let ino = if let Some(dir) = self
             .find_dir(parent, name)
             .map(|dir| dir.attr.ino)
             .and_then(|ino| self.dirs.get_mut(&ino))
@@ -431,7 +440,7 @@ impl Fuse {
             dir.path = new_path;
             dir.name = new_name.to_owned();
 
-            Ok(Some(()))
+            dir.attr.ino
         } else if let Some(file) = self
             .find_file(parent, name)
             .map(|file| file.attr.ino)
@@ -446,10 +455,15 @@ impl Fuse {
             file.path = new_path;
             file.name = new_name.to_owned();
 
-            Ok(Some(()))
+            file.attr.ino
         } else {
-            Ok(None)
-        }
+            return Ok(None);
+        };
+
+        self.dirs.get_mut(&parent).unwrap().children.remove(&ino);
+        self.dirs.get_mut(&new_parent).unwrap().children.insert(ino);
+
+        Ok(Some(()))
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -458,7 +472,11 @@ impl Fuse {
             return Ok(None);
         };
 
-        let file = File::open(&file.path).context("failed opening file")?;
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .open(&file.path)
+            .context("failed opening file")?;
 
         let fd = file.as_raw_fd() as u64;
         self.handles.insert(ino, file);
@@ -468,15 +486,18 @@ impl Fuse {
 
     #[allow(clippy::cast_precision_loss)]
     fn read_wrapper(&mut self, ino: u64, offset: usize, size: usize) -> Result<Option<Vec<u8>>> {
-        let Some(file) = self.files.get(&ino) else {
+        ensure!(
+            offset % BLOCK_SIZE == 0,
+            "offset must be a multiple of the block size (currently)",
+        );
+
+        let Some((file, f)) = self.files.get(&ino).zip(self.handles.get(&ino)) else {
             return Ok(None);
         };
 
         let offset = self.cipher.to_crypt::<BLOCK_SIZE>(offset);
         let size = self.cipher.to_crypt::<BLOCK_SIZE>(size);
         let block_size = BLOCK_SIZE + self.cipher.overhead();
-
-        let f = File::open(&file.path).context("failed opening file")?;
 
         let real_size = f.metadata()?.size() as usize;
         let mut content = vec![0; size.min(real_size - offset - FileHeader::LEN)];
@@ -490,6 +511,125 @@ impl Fuse {
             .context("failed decrypting content")?;
 
         Ok(Some(plain))
+    }
+
+    fn write_wrapper(&mut self, ino: u64, offset: usize, data: &[u8]) -> Result<Option<u32>> {
+        ensure!(
+            offset % BLOCK_SIZE == 0,
+            "offset must be a multiple of the block size (currently)",
+        );
+
+        let Some((file, f)) = self.files.get_mut(&ino).zip(self.handles.get_mut(&ino)) else {
+            return Ok(None);
+        };
+
+        let crypt_offset = self.cipher.to_crypt::<BLOCK_SIZE>(offset);
+        let block_size = BLOCK_SIZE + self.cipher.overhead();
+
+        let mut chunks = data[offset % BLOCK_SIZE..]
+            .chunks_exact(BLOCK_SIZE)
+            .enumerate();
+
+        for (i, chunk) in &mut chunks {
+            let block_offset = crypt_offset / block_size * i;
+            let ciphertext = self
+                .cipher
+                .encrypt(&self.master_key, &file.head, chunk, block_offset)
+                .context("failed encrypting content")?;
+
+            f.write_all_at(&ciphertext, (FileHeader::LEN + block_offset) as u64)
+                .context("failed writing content")?;
+        }
+
+        let blocks = data[offset % BLOCK_SIZE..].len() / BLOCK_SIZE;
+        let rem = data[offset % BLOCK_SIZE..].len() % BLOCK_SIZE;
+
+        if rem > 0 {
+            trace!(blocks, rem, crypt_offset, block_size; "meep");
+
+            let ciphertext = self
+                .cipher
+                .encrypt(
+                    &self.master_key,
+                    &file.head,
+                    &data[data.len() - rem..],
+                    blocks,
+                )
+                .context("failed encrypting content")?;
+
+            f.write_all_at(
+                &ciphertext,
+                (FileHeader::LEN + crypt_offset + block_size * blocks) as u64,
+            )
+            .context("failed writing content")?;
+        }
+
+        let meta = f.metadata().context("failed reading metadata")?;
+        let (size, blocks) = self.cipher.to_plain::<BLOCK_SIZE>(meta.size() as usize);
+
+        file.attr = file_attr(&meta, size as u64, blocks as u64)?;
+
+        Ok(Some(data.len() as u32))
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    fn create_wrapper(
+        &mut self,
+        parent: u64,
+        name: &OsStr,
+        mode: Mode,
+    ) -> Result<Option<(FileAttr, u64)>> {
+        if let Some(attr) = self.find_file(parent, name).map(|file| file.attr) {
+            return self.open_wrapper(attr.ino).map(|fd| Some(attr).zip(fd));
+        }
+
+        let Some(dir) = self.dirs.get(&parent) else {
+            return Ok(None);
+        };
+
+        let crypt_name = gocryptfs::names::encrypt(&self.master_key, &dir.iv, name)
+            .context("failed encrypting file name")?;
+        let path = dir.path.join(crypt_name);
+
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(mode.bits())
+            .open(&path)
+            .context("failed creating file")?;
+        let head = FileHeader::new();
+
+        file.write_all(&head.to_array())
+            .context("failed writing file header")?;
+        file.flush().context("failed flushing file content")?;
+
+        let attr = file_attr(
+            &file.metadata().context("failed reading file metadata")?,
+            0,
+            0,
+        )?;
+
+        self.dirs
+            .get_mut(&parent)
+            .unwrap()
+            .children
+            .insert(attr.ino);
+        self.files.insert(
+            attr.ino,
+            FuseFile {
+                parent,
+                path,
+                name: name.to_owned(),
+                attr,
+                head,
+            },
+        );
+
+        let fd = file.as_raw_fd() as u64;
+        self.handles.insert(attr.ino, file);
+
+        Ok(Some((attr, fd)))
     }
 }
 
@@ -655,7 +795,15 @@ impl fuser::Filesystem for Fuse {
         reply: fuser::ReplyEmpty,
     ) {
         debug!(parent, name:?; "unlink");
-        reply.error(libc::ENOSYS);
+
+        match self.unlink_wrapper(parent, name) {
+            Ok(Some(())) => reply.ok(),
+            Ok(None) => reply.error(libc::ENOENT),
+            Err(e) => {
+                error!(error:err = *e; "unlink failed");
+                reply.error(libc::EIO);
+            }
+        }
     }
 
     fn rmdir(
@@ -682,7 +830,7 @@ impl fuser::Filesystem for Fuse {
         _req: &fuser::Request<'_>,
         parent: u64,
         link_name: &OsStr,
-        target: &std::path::Path,
+        target: &Path,
         reply: fuser::ReplyEntry,
     ) {
         debug!(parent, link_name:?, target:?; "symlink");
@@ -776,8 +924,25 @@ impl fuser::Filesystem for Fuse {
         lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
-        debug!(ino, fh, offset, data_len = data.len(), write_flags, flags:? = OpenFlags::from_bits_truncate(flags), lock_owner; "write");
-        reply.error(libc::ENOSYS);
+        debug!(
+            ino,
+            fh,
+            offset,
+            data_len = data.len(),
+            write_flags:? = WriteFlags::from_bits_truncate(write_flags),
+            flags:? = OpenFlags::from_bits_truncate(flags),
+            lock_owner;
+            "write",
+        );
+
+        match self.write_wrapper(ino, offset as usize, data) {
+            Ok(Some(size)) => reply.written(size),
+            Ok(None) => reply.error(libc::ENOENT),
+            Err(e) => {
+                error!(error:err = *e; "write failed");
+                reply.error(libc::EIO);
+            }
+        }
     }
 
     fn flush(
@@ -983,8 +1148,22 @@ impl fuser::Filesystem for Fuse {
         flags: i32,
         reply: fuser::ReplyCreate,
     ) {
-        debug!(parent, name:?, mode:? = Mode::from_bits_truncate(mode), umask, flags:? = OpenFlags::from_bits_truncate(flags); "create");
-        reply.error(libc::ENOSYS);
+        let mode = Mode::from_bits_truncate(mode);
+        let flags = OpenFlags::from_bits_truncate(flags);
+        debug!(parent, name:?, mode:?, umask, flags:?; "create");
+
+        match self.create_wrapper(parent, name, mode) {
+            Ok(Some((attr, fd))) => reply.created(&TTL, &attr, 0, fd, flags.bits() as u32),
+            Ok(None) => reply.error(libc::ENOENT),
+            Err(e) => {
+                error!(error:err = *e; "create failed");
+                reply.error(
+                    e.downcast::<Errno>()
+                        .map(|e| e as c_int)
+                        .unwrap_or(libc::EIO),
+                );
+            }
+        }
     }
 
     fn getlk(
@@ -1148,6 +1327,18 @@ bitflags! {
         const SET_GID = libc::S_ISGID;
         /// Sticky bit.
         const STICKY = libc::S_ISVTX;
+    }
+}
+
+bitflags! {
+    #[derive(Clone, Copy, Debug)]
+    struct WriteFlags: u32 {
+        /// Delayed write from page cache, file handle is guessed.
+        const CACHE = fuser::consts::FUSE_WRITE_CACHE;
+        /// The `lock_owner`` field is valid.
+        const LOCKOWNER = fuser::consts::FUSE_WRITE_LOCKOWNER;
+        /// Kill suid and sgid bits.
+        const KILL_PRIV = fuser::consts::FUSE_WRITE_KILL_PRIV;
     }
 }
 

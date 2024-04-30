@@ -22,7 +22,7 @@ daemonize = "0.5.0"
 dialoguer = { version = "0.11.0", default-features = false, features = ["password"] }
 eme-mode = { version = "0.3.1", features = ["std", "zeroize"] }
 flume = { version = "0.11.0", default-features = false, features = ["select"] }
-fuser = { version = "0.14.0", features = ["abi-7-19"] }
+fuser = { version = "0.14.0", features = ["abi-7-31"] }
 hkdf = { version = "0.12.4", features = ["std"] }
 libc = "0.2.153"
 log = { version = "0.4.21", features = ["release_max_level_info", "kv_std"] }

@@ -138,13 +138,13 @@ impl<T: Write> VisitValue<'_> for Visitor<'_, T> {
     }
 
     fn visit_error(&mut self, err: &(dyn std::error::Error + 'static)) -> Result<(), kv::Error> {
-        write!(self.0, "{ERROR_STYLE}{err}{ERROR_STYLE:#}").map_err(Into::into)
+        write!(self.0, "{ERROR_STYLE}{err:#?}{ERROR_STYLE:#}").map_err(Into::into)
     }
 
     fn visit_borrowed_error(
         &mut self,
         err: &'_ (dyn std::error::Error + 'static),
     ) -> Result<(), kv::Error> {
-        write!(self.0, "{ERROR_STYLE}{err}{ERROR_STYLE:#}").map_err(Into::into)
+        write!(self.0, "{ERROR_STYLE}{err:#?}{ERROR_STYLE:#}").map_err(Into::into)
     }
 }

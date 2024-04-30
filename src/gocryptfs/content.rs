@@ -44,7 +44,6 @@ impl FileHeader {
         Ok((head, data))
     }
 
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             version: 2,
@@ -52,7 +51,12 @@ impl FileHeader {
         }
     }
 
-    #[allow(dead_code)]
+    pub fn to_array(&self) -> [u8; Self::LEN] {
+        let mut buf = [0; Self::LEN];
+        self.copy_to_slice(&mut buf);
+        buf
+    }
+
     fn copy_to_slice<'a>(&self, dst: &'a mut [u8]) -> &'a mut [u8] {
         dst[..Self::LEN][..Self::VERSION_LEN].copy_from_slice(&self.version.to_be_bytes());
         dst[..Self::LEN][Self::VERSION_LEN..].copy_from_slice(&self.file_id);
@@ -120,7 +124,12 @@ where
 }
 
 #[allow(dead_code, clippy::cast_possible_truncation)]
-pub fn encrypt<C>(master_key: &MasterKey, header: &FileHeader, data: &[u8]) -> Result<Vec<u8>>
+pub fn encrypt<C>(
+    master_key: &MasterKey,
+    header: &FileHeader,
+    data: &[u8],
+    block_offset: usize,
+) -> Result<Vec<u8>>
 where
     C: AeadInPlace + AeadSize + KeyDerive + KeyInit + Send + Sync,
 {
@@ -139,7 +148,7 @@ where
         .zip(chunks_out)
         .enumerate()
         .try_for_each(|(block_id, (chunk_in, chunk_out))| {
-            encrypt_block(&cc, header, block_id, chunk_in, chunk_out)
+            encrypt_block(&cc, header, block_id + block_offset, chunk_in, chunk_out)
         })?;
 
     Ok(output)
@@ -210,7 +219,7 @@ mod tests {
         let header = FileHeader::new();
         let content = vec![5; size];
 
-        let crypt = encrypt::<XChaCha20Poly1305>(&mk, &header, &content)?;
+        let crypt = encrypt::<XChaCha20Poly1305>(&mk, &header, &content, 0)?;
         let plain = decrypt::<XChaCha20Poly1305>(&mk, &header, &crypt, 0)?;
 
         assert_eq!(content, &*plain);
