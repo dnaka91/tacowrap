@@ -100,7 +100,13 @@ impl Fuse {
             let path = entry.path();
 
             if gocryptfs::is_crypto_dir(file_type, &path) {
-                let name = gocryptfs::names::decrypt(&master_key, &root_iv, &file_name)?;
+                let name = gocryptfs::names::decrypt(&master_key, &root_iv, &file_name)
+                    .with_context(|| {
+                        format!(
+                            "failed decrypting directory name `{}`",
+                            file_name.to_string_lossy()
+                        )
+                    })?;
                 let meta = entry.metadata()?;
                 let iv = gocryptfs::names::load_iv(&path)?;
 
@@ -116,7 +122,13 @@ impl Fuse {
                 );
                 children.insert(meta.ino());
             } else if gocryptfs::is_crypto_file(file_type, &file_name) {
-                let name = gocryptfs::names::decrypt(&master_key, &root_iv, &file_name)?;
+                let name = gocryptfs::names::decrypt(&master_key, &root_iv, &file_name)
+                    .with_context(|| {
+                        format!(
+                            "failed decrypting file name `{}`",
+                            file_name.to_string_lossy()
+                        )
+                    })?;
                 let head = file_head(&path)?;
                 let meta = entry.metadata()?;
                 let (size, blocks) = file_size(&cipher, &meta);
