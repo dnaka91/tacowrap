@@ -1,0 +1,11 @@
+:root {
+  --vp-c-brand-1: hwb(210 0% 15%);
+  --vp-c-brand-2: hwb(220 0% 15%);
+  --vp-c-brand-3: hwb(200 0% 15%);
+}
+
+.dark {
+  --vp-c-brand-1: hwb(210 20% 0%);
+  --vp-c-brand-2: hwb(220 20% 0%);
+  --vp-c-brand-3: hwb(200 20% 0%);
+}

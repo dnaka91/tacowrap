@@ -1,0 +1,14 @@
+{
+  "name": "docs",
+  "private": true,
+  "scripts": {
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview",
+    "lint": "biome check --apply .vitepress/config.mts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.7.2",
+    "vitepress": "^1.1.4"
+  }
+}
