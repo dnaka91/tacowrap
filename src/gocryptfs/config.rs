@@ -221,32 +221,25 @@ mod tests {
             "Creator": "",
             "EncryptedKey": BASE64_STANDARD.encode([0; 4]),
             "ScryptObject": {
-                "Salt": BASE64_STANDARD.encode([0; 2]),
-                "N": 1,
-                "R": 1,
+                "Salt": BASE64_STANDARD.encode([0; 32]),
+                "N": 1024,
+                "R": 8,
                 "P": 1,
                 "KeyLen": 32
             },
             "Version": 2,
             "FeatureFlags": [
-                "PlaintextNames",
                 "DirIV",
                 "EMENames",
-                "GCMIV128",
                 "LongNames",
-                "LongNameMax",
-                "AESSIV",
                 "Raw64",
                 "HKDF",
-                "FIDO2",
                 "XChaCha20Poly1305"
             ]
         }};
 
         std::fs::write(dir.path().join(CONFIG_NAME), config.to_string())?;
-        let config = load(dir.path())?;
-
-        println!("{config:#?}");
+        load(dir.path())?;
 
         Ok(())
     }
