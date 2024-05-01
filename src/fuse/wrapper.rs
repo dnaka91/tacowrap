@@ -81,7 +81,7 @@ impl Fuse {
                     .context("failed truncating file")?;
             } else {
                 // TODO: last block needs to be re-encrypted after truncation
-                // nix::unistd::truncate(&entry.path, size as libc::off_t).unwrap();
+                // nix::unistd::truncate(&entry.path, size as libc::off_t);
                 warn!("size changes not supported");
             }
         }
@@ -139,11 +139,11 @@ impl Fuse {
             .context("failed writing dir IV")?;
 
         let attr = dir_attr(&path.metadata().context("failed loading dir metadata")?)?;
-        self.dirs
-            .get_mut(&parent)
-            .unwrap()
-            .children
-            .insert(attr.ino);
+
+        if let Some(parent) = self.dirs.get_mut(&parent) {
+            parent.children.insert(attr.ino);
+        }
+
         self.dirs.insert(
             attr.ino,
             FuseDir {
@@ -165,9 +165,11 @@ impl Fuse {
         };
 
         fs::remove_file(self.file_path(entry)).context("failed removing file")?;
-
         let entry = entry.attr.ino;
-        self.dirs.get_mut(&parent).unwrap().children.remove(&entry);
+
+        if let Some(parent) = self.dirs.get_mut(&parent) {
+            parent.children.remove(&entry);
+        }
         self.files.remove(&entry);
 
         Ok(Some(()))
@@ -179,14 +181,17 @@ impl Fuse {
         };
 
         fs::remove_dir(self.dir_path(entry)).context("failed removing directory")?;
-
         let entry = entry.attr.ino;
-        self.dirs.get_mut(&parent).unwrap().children.remove(&entry);
 
-        let entry = self.dirs.remove(&entry).unwrap();
-        for child in entry.children {
-            self.dirs.remove(&child);
-            self.files.remove(&child);
+        if let Some(parent) = self.dirs.get_mut(&parent) {
+            parent.children.remove(&entry);
+        }
+
+        if let Some(entry) = self.dirs.remove(&entry) {
+            for child in entry.children {
+                self.dirs.remove(&child);
+                self.files.remove(&child);
+            }
         }
 
         Ok(Some(()))
@@ -240,8 +245,12 @@ impl Fuse {
             return Ok(None);
         };
 
-        self.dirs.get_mut(&parent).unwrap().children.remove(&ino);
-        self.dirs.get_mut(&new_parent).unwrap().children.insert(ino);
+        if let Some(parent) = self.dirs.get_mut(&parent) {
+            parent.children.remove(&ino);
+        }
+        if let Some(new_parent) = self.dirs.get_mut(&new_parent) {
+            new_parent.children.insert(ino);
+        }
 
         Ok(Some(()))
     }
@@ -404,11 +413,10 @@ impl Fuse {
             0,
         )?;
 
-        self.dirs
-            .get_mut(&parent)
-            .unwrap()
-            .children
-            .insert(attr.ino);
+        if let Some(parent) = self.dirs.get_mut(&parent) {
+            parent.children.insert(attr.ino);
+        }
+
         self.files.insert(
             attr.ino,
             FuseFile {
@@ -430,9 +438,10 @@ impl Fuse {
 fn convert_time_spec(time: Option<fuser::TimeOrNow>) -> TimeSpec {
     match time {
         Some(fuser::TimeOrNow::Now) => TimeSpec::UTIME_NOW,
-        Some(fuser::TimeOrNow::SpecificTime(t)) => {
-            TimeSpec::from_duration(t.duration_since(SystemTime::UNIX_EPOCH).unwrap())
-        }
+        Some(fuser::TimeOrNow::SpecificTime(t)) => TimeSpec::from_duration(
+            t.duration_since(SystemTime::UNIX_EPOCH)
+                .expect("valid post-epoch timestamp"),
+        ),
         None => TimeSpec::UTIME_OMIT,
     }
 }
