@@ -1,8 +1,7 @@
 use std::{
     ffi::OsStr,
     fs::{self, File},
-    io::Write,
-    os::{fd::AsRawFd, unix::prelude::*},
+    os::unix::prelude::*,
     time::SystemTime,
 };
 
@@ -22,28 +21,10 @@ use crate::gocryptfs::{
 };
 
 impl Fuse {
-    pub(super) fn lookup_wrapper(
-        &mut self,
-        parent: u64,
-        name: &OsStr,
-    ) -> Result<Option<&FileAttr>> {
-        let Some(dir) = self.dirs.get(&parent) else {
-            return Ok(None);
-        };
+    pub(super) fn lookup_wrapper(&mut self, parent: u64, name: &OsStr) -> Option<&FileAttr> {
+        let dir = self.dirs.get(&parent)?;
 
-        let dir = if dir.children.is_empty() {
-            let (dirs, files, children) = self.read_dir(dir).context("failed reading directory")?;
-            self.dirs.extend(dirs);
-            self.files.extend(files);
-            let dir = self.dirs.get_mut(&parent).unwrap();
-            dir.children = children;
-            self.dirs.get(&parent).unwrap()
-        } else {
-            dir
-        };
-
-        let entry = dir
-            .children
+        dir.children
             .iter()
             .filter_map(|ino| self.dirs.get(ino))
             .find_map(|dir| (dir.name == name).then_some(&dir.attr))
@@ -52,9 +33,7 @@ impl Fuse {
                     .iter()
                     .filter_map(|ino| self.files.get(ino))
                     .find_map(|file| (file.name == name).then_some(&file.attr))
-            });
-
-        Ok(entry)
+            })
     }
 
     #[allow(

@@ -12,6 +12,7 @@ use std::{
 use anyhow::{Context, Result};
 use bitflags::bitflags;
 use fuser::FileAttr;
+use log::info;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::gocryptfs::{
@@ -81,90 +82,38 @@ impl Fuse {
     ) -> Result<Self> {
         let cipher = DynCipher::new(flags);
         let meta = base_dir.metadata()?;
+
         let mut dirs = FxHashMap::default();
         let mut files = FxHashMap::default();
-        let mut children = FxHashSet::default();
 
-        for entry in std::fs::read_dir(&base_dir)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            let file_name = entry.file_name();
-            let path = entry.path();
-
-            if gocryptfs::is_crypto_dir(file_type, &path) {
-                let name = gocryptfs::names::decrypt(&master_key, &root_iv, &file_name)
-                    .with_context(|| {
-                        format!(
-                            "failed decrypting directory name `{}`",
-                            file_name.to_string_lossy()
-                        )
-                    })?;
-                let meta = entry.metadata()?;
-                let iv = gocryptfs::names::load_iv(&path)?;
-
-                dirs.insert(
-                    meta.ino(),
-                    FuseDir {
-                        path,
-                        name,
-                        attr: dir_attr(&meta)?,
-                        children: FxHashSet::default(),
-                        iv,
-                    },
-                );
-                children.insert(meta.ino());
-            } else if gocryptfs::is_crypto_file(file_type, &file_name) {
-                let name = gocryptfs::names::decrypt(&master_key, &root_iv, &file_name)
-                    .with_context(|| {
-                        format!(
-                            "failed decrypting file name `{}`",
-                            file_name.to_string_lossy()
-                        )
-                    })?;
-                let head = file_head(&path)?;
-                let meta = entry.metadata()?;
-                let (size, blocks) = file_size(&cipher, &meta);
-
-                files.insert(
-                    meta.ino(),
-                    FuseFile {
-                        parent: fuser::FUSE_ROOT_ID,
-                        path,
-                        name,
-                        attr: file_attr(&meta, size, blocks)?,
-                        head,
-                    },
-                );
-                children.insert(meta.ino());
-            }
-        }
-
-        dirs.insert(
-            fuser::FUSE_ROOT_ID,
-            FuseDir {
-                path: base_dir.clone(),
-                name: OsString::new(),
-                attr: FileAttr {
-                    ino: fuser::FUSE_ROOT_ID,
-                    size: 0,
-                    blocks: 0,
-                    atime: meta.accessed()?,
-                    mtime: meta.modified()?,
-                    ctime: meta.created()?,
-                    crtime: meta.created()?,
-                    kind: fuser::FileType::Directory,
-                    perm: 0o755,
-                    nlink: 1,
-                    uid: 0,
-                    gid: 0,
-                    rdev: 0,
-                    blksize: 512,
-                    flags: 0,
-                },
-                children,
-                iv: root_iv,
+        let mut root = FuseDir {
+            path: base_dir.clone(),
+            name: OsString::new(),
+            attr: FileAttr {
+                ino: fuser::FUSE_ROOT_ID,
+                size: 0,
+                blocks: 0,
+                atime: meta.accessed()?,
+                mtime: meta.modified()?,
+                ctime: meta.created()?,
+                crtime: meta.created()?,
+                kind: fuser::FileType::Directory,
+                perm: 0o755,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                rdev: 0,
+                blksize: 512,
+                flags: 0,
             },
-        );
+            children: FxHashSet::default(),
+            iv: root_iv,
+        };
+
+        read_dir_recursive(&master_key, &cipher, &mut root, &mut dirs, &mut files)?;
+        dirs.insert(fuser::FUSE_ROOT_ID, root);
+
+        info!(dirs = dirs.len() - 1, files = files.len(); "taco opened");
 
         Ok(Self {
             base_dir,
@@ -182,64 +131,6 @@ impl Fuse {
         self
     }
 
-    #[allow(clippy::type_complexity)]
-    fn read_dir(
-        &self,
-        dir: &FuseDir,
-    ) -> Result<(
-        FxHashMap<u64, FuseDir>,
-        FxHashMap<u64, FuseFile>,
-        FxHashSet<u64>,
-    )> {
-        let mut dirs = FxHashMap::default();
-        let mut files = FxHashMap::default();
-        let mut children = FxHashSet::default();
-
-        for entry in std::fs::read_dir(&dir.path)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            let file_name = entry.file_name();
-            let path = entry.path();
-
-            if gocryptfs::is_crypto_dir(file_type, &path) {
-                let name = gocryptfs::names::decrypt(&self.master_key, &dir.iv, &file_name)?;
-                let meta = entry.metadata()?;
-                let iv = gocryptfs::names::load_iv(&path)?;
-
-                dirs.insert(
-                    meta.ino(),
-                    FuseDir {
-                        path,
-                        name,
-                        attr: dir_attr(&meta)?,
-                        children: FxHashSet::default(),
-                        iv,
-                    },
-                );
-                children.insert(meta.ino());
-            } else if gocryptfs::is_crypto_file(file_type, &file_name) {
-                let name = gocryptfs::names::decrypt(&self.master_key, &dir.iv, &file_name)?;
-                let head = file_head(&path)?;
-                let meta = entry.metadata()?;
-                let (size, blocks) = file_size(&self.cipher, &meta);
-
-                files.insert(
-                    meta.ino(),
-                    FuseFile {
-                        parent: fuser::FUSE_ROOT_ID,
-                        path,
-                        name,
-                        attr: file_attr(&meta, size, blocks)?,
-                        head,
-                    },
-                );
-                children.insert(meta.ino());
-            }
-        }
-
-        Ok((dirs, files, children))
-    }
-
     fn find_dir(&self, parent: u64, name: &OsStr) -> Option<&FuseDir> {
         let parent = self.dirs.get(&parent)?;
         parent.children.iter().find_map(|c| {
@@ -255,6 +146,98 @@ impl Fuse {
             (file.name == name).then_some(file)
         })
     }
+}
+
+#[allow(clippy::type_complexity)]
+fn read_dir(
+    master_key: &MasterKey,
+    cipher: &DynCipher,
+    dir: &FuseDir,
+) -> Result<(
+    FxHashMap<u64, FuseDir>,
+    FxHashMap<u64, FuseFile>,
+    FxHashSet<u64>,
+)> {
+    let mut dirs = FxHashMap::default();
+    let mut files = FxHashMap::default();
+    let mut children = FxHashSet::default();
+
+    for entry in std::fs::read_dir(&dir.path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let file_name = entry.file_name();
+        let path = entry.path();
+
+        if gocryptfs::is_crypto_dir(file_type, &path) {
+            let name =
+                gocryptfs::names::decrypt(master_key, &dir.iv, &file_name).with_context(|| {
+                    format!(
+                        "failed decrypting directory name `{}`",
+                        file_name.to_string_lossy()
+                    )
+                })?;
+            let meta = entry.metadata()?;
+            let iv = gocryptfs::names::load_iv(&path).context("failed loading directory nonce")?;
+
+            dirs.insert(
+                meta.ino(),
+                FuseDir {
+                    path,
+                    name,
+                    attr: dir_attr(&meta)?,
+                    children: FxHashSet::default(),
+                    iv,
+                },
+            );
+            children.insert(meta.ino());
+        } else if gocryptfs::is_crypto_file(file_type, &file_name) {
+            let name =
+                gocryptfs::names::decrypt(master_key, &dir.iv, &file_name).with_context(|| {
+                    format!(
+                        "failed decrypting file name `{}`",
+                        file_name.to_string_lossy()
+                    )
+                })?;
+            let meta = entry.metadata()?;
+            let head = (meta.size() > 0).then(|| file_head(&path)).transpose()?;
+            let (size, blocks) = file_size(cipher, &meta);
+
+            files.insert(
+                meta.ino(),
+                FuseFile {
+                    parent: dir.attr.ino,
+                    path,
+                    name,
+                    attr: file_attr(&meta, size, blocks)?,
+                    head,
+                },
+            );
+            children.insert(meta.ino());
+        }
+    }
+
+    Ok((dirs, files, children))
+}
+
+fn read_dir_recursive(
+    master_key: &MasterKey,
+    cipher: &DynCipher,
+    dir: &mut FuseDir,
+    dirs: &mut FxHashMap<u64, FuseDir>,
+    files: &mut FxHashMap<u64, FuseFile>,
+) -> Result<()> {
+    let (mut found_dirs, found_files, children) =
+        read_dir(master_key, cipher, dir).context("failed reading directory")?;
+
+    for dir in found_dirs.values_mut() {
+        read_dir_recursive(master_key, cipher, dir, dirs, files)?;
+    }
+
+    dirs.extend(found_dirs);
+    files.extend(found_files);
+    dir.children = children;
+
+    Ok(())
 }
 
 bitflags! {

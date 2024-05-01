@@ -43,12 +43,8 @@ impl fuser::Filesystem for Fuse {
         debug!(parent, name:?; "lookup");
 
         match self.lookup_wrapper(parent, name) {
-            Ok(Some(entry)) => reply.entry(&TTL, entry, 0),
-            Ok(None) => reply.error(libc::ENOENT),
-            Err(e) => {
-                error!(error:err = *e; "lookup failed");
-                reply.error(libc::EIO);
-            }
+            Some(entry) => reply.entry(&TTL, entry, 0),
+            None => reply.error(libc::ENOENT),
         }
     }
 
@@ -408,25 +404,6 @@ impl fuser::Filesystem for Fuse {
             (dir.attr.ino, fuser::FileType::Directory, "."),
             (dir.attr.ino, fuser::FileType::Directory, ".."),
         ];
-
-        let dir = if dir.children.is_empty() {
-            match self.read_dir(dir) {
-                Ok((dirs, files, children)) => {
-                    self.dirs.extend(dirs);
-                    self.files.extend(files);
-                    let dir = self.dirs.get_mut(&ino).unwrap();
-                    dir.children = children;
-                    self.dirs.get(&ino).unwrap()
-                }
-                Err(e) => {
-                    error!(error:err = *e; "failed reading directory");
-                    reply.error(libc::ENOSYS);
-                    return;
-                }
-            }
-        } else {
-            dir
-        };
 
         let dirs = dir
             .children
