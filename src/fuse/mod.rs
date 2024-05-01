@@ -36,8 +36,9 @@ pub struct Fuse {
 }
 
 struct FuseDir {
-    path: PathBuf,
-    name: OsString,
+    parent: u64,
+    crypt_name: OsString,
+    plain_name: OsString,
     attr: FileAttr,
     children: FxHashSet<u64>,
     iv: gocryptfs::names::Iv,
@@ -46,8 +47,8 @@ struct FuseDir {
 #[allow(dead_code)]
 struct FuseFile {
     parent: u64,
-    path: PathBuf,
-    name: OsString,
+    crypt_name: OsString,
+    plain_name: OsString,
     attr: FileAttr,
     head: Option<FileHeader>,
 }
@@ -87,8 +88,9 @@ impl Fuse {
         let mut files = FxHashMap::default();
 
         let mut root = FuseDir {
-            path: base_dir.clone(),
-            name: OsString::new(),
+            parent: 0,
+            crypt_name: OsString::new(),
+            plain_name: OsString::new(),
             attr: FileAttr {
                 ino: fuser::FUSE_ROOT_ID,
                 size: 0,
@@ -110,7 +112,14 @@ impl Fuse {
             iv: root_iv,
         };
 
-        read_dir_recursive(&master_key, &cipher, &mut root, &mut dirs, &mut files)?;
+        read_dir_recursive(
+            &master_key,
+            &cipher,
+            &mut base_dir.clone(),
+            &mut root,
+            &mut dirs,
+            &mut files,
+        )?;
         dirs.insert(fuser::FUSE_ROOT_ID, root);
 
         info!(dirs = dirs.len() - 1, files = files.len(); "taco opened");
@@ -135,7 +144,7 @@ impl Fuse {
         let parent = self.dirs.get(&parent)?;
         parent.children.iter().find_map(|c| {
             let dir = self.dirs.get(c)?;
-            (dir.name == name).then_some(dir)
+            (dir.plain_name == name).then_some(dir)
         })
     }
 
@@ -143,8 +152,31 @@ impl Fuse {
         let parent = self.dirs.get(&parent)?;
         parent.children.iter().find_map(|c| {
             let file = self.files.get(c)?;
-            (file.name == name).then_some(file)
+            (file.plain_name == name).then_some(file)
         })
+    }
+
+    /// Create the absolute path to a directory.
+    fn dir_path(&self, dir: &FuseDir) -> PathBuf {
+        self.build_path(&dir.crypt_name, dir.parent)
+    }
+
+    /// Create the absolute path to a file.
+    fn file_path(&self, file: &FuseFile) -> PathBuf {
+        self.build_path(&file.crypt_name, file.parent)
+    }
+
+    /// Create the path from the given name, traversing the parent up to the root.
+    fn build_path(&self, name: &OsStr, parent: u64) -> PathBuf {
+        let mut buf = vec![name];
+        let mut ino = parent;
+
+        while let Some(parent) = self.dirs.get(&ino) {
+            buf.push(&parent.crypt_name);
+            ino = parent.parent;
+        }
+
+        self.base_dir.iter().chain(buf.into_iter().rev()).collect()
     }
 }
 
@@ -152,7 +184,7 @@ impl Fuse {
 fn read_dir(
     master_key: &MasterKey,
     cipher: &DynCipher,
-    dir: &FuseDir,
+    dir: (u64, &Path, gocryptfs::names::Iv),
 ) -> Result<(
     FxHashMap<u64, FuseDir>,
     FxHashMap<u64, FuseFile>,
@@ -162,7 +194,7 @@ fn read_dir(
     let mut files = FxHashMap::default();
     let mut children = FxHashSet::default();
 
-    for entry in std::fs::read_dir(&dir.path)? {
+    for entry in std::fs::read_dir(dir.1)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let file_name = entry.file_name();
@@ -170,7 +202,7 @@ fn read_dir(
 
         if gocryptfs::is_crypto_dir(file_type, &path) {
             let name =
-                gocryptfs::names::decrypt(master_key, &dir.iv, &file_name).with_context(|| {
+                gocryptfs::names::decrypt(master_key, &dir.2, &file_name).with_context(|| {
                     format!(
                         "failed decrypting directory name `{}`",
                         file_name.to_string_lossy()
@@ -182,8 +214,9 @@ fn read_dir(
             dirs.insert(
                 meta.ino(),
                 FuseDir {
-                    path,
-                    name,
+                    parent: dir.0,
+                    crypt_name: file_name,
+                    plain_name: name,
                     attr: dir_attr(&meta)?,
                     children: FxHashSet::default(),
                     iv,
@@ -192,7 +225,7 @@ fn read_dir(
             children.insert(meta.ino());
         } else if gocryptfs::is_crypto_file(file_type, &file_name) {
             let name =
-                gocryptfs::names::decrypt(master_key, &dir.iv, &file_name).with_context(|| {
+                gocryptfs::names::decrypt(master_key, &dir.2, &file_name).with_context(|| {
                     format!(
                         "failed decrypting file name `{}`",
                         file_name.to_string_lossy()
@@ -205,9 +238,9 @@ fn read_dir(
             files.insert(
                 meta.ino(),
                 FuseFile {
-                    parent: dir.attr.ino,
-                    path,
-                    name,
+                    parent: dir.0,
+                    crypt_name: file_name,
+                    plain_name: name,
                     attr: file_attr(&meta, size, blocks)?,
                     head,
                 },
@@ -222,20 +255,26 @@ fn read_dir(
 fn read_dir_recursive(
     master_key: &MasterKey,
     cipher: &DynCipher,
+    base: &mut PathBuf,
     dir: &mut FuseDir,
     dirs: &mut FxHashMap<u64, FuseDir>,
     files: &mut FxHashMap<u64, FuseFile>,
 ) -> Result<()> {
+    base.push(&dir.crypt_name);
+
     let (mut found_dirs, found_files, children) =
-        read_dir(master_key, cipher, dir).context("failed reading directory")?;
+        read_dir(master_key, cipher, (dir.attr.ino, &base, dir.iv))
+            .context("failed reading directory")?;
 
     for dir in found_dirs.values_mut() {
-        read_dir_recursive(master_key, cipher, dir, dirs, files)?;
+        read_dir_recursive(master_key, cipher, base, dir, dirs, files)?;
     }
 
     dirs.extend(found_dirs);
     files.extend(found_files);
     dir.children = children;
+
+    base.pop();
 
     Ok(())
 }

@@ -27,12 +27,12 @@ impl Fuse {
         dir.children
             .iter()
             .filter_map(|ino| self.dirs.get(ino))
-            .find_map(|dir| (dir.name == name).then_some(&dir.attr))
+            .find_map(|dir| (dir.plain_name == name).then_some(&dir.attr))
             .or_else(|| {
                 dir.children
                     .iter()
                     .filter_map(|ino| self.files.get(ino))
-                    .find_map(|file| (file.name == name).then_some(&file.attr))
+                    .find_map(|file| (file.plain_name == name).then_some(&file.attr))
             })
     }
 
@@ -51,11 +51,11 @@ impl Fuse {
         atime: Option<fuser::TimeOrNow>,
         mtime: Option<fuser::TimeOrNow>,
     ) -> Result<Option<FileAttr>> {
-        let Some((path, attr)) = self
+        let Some(path) = self
             .files
-            .get_mut(&ino)
-            .map(|f| (&f.path, &mut f.attr))
-            .or_else(|| self.dirs.get_mut(&ino).map(|d| (&d.path, &mut d.attr)))
+            .get(&ino)
+            .map(|f| self.file_path(f))
+            .or_else(|| self.dirs.get(&ino).map(|d| self.dir_path(d)))
         else {
             return Ok(None);
         };
@@ -63,7 +63,7 @@ impl Fuse {
         if let Some(mode) = mode {
             nix::sys::stat::fchmodat(
                 None,
-                path,
+                &path,
                 nix::sys::stat::Mode::from_bits_truncate(mode.bits()),
                 FchmodatFlags::NoFollowSymlink,
             )
@@ -71,13 +71,13 @@ impl Fuse {
         }
 
         if uid.is_some() || gid.is_some() {
-            nix::unistd::chown(path, uid.map(Into::into), gid.map(Into::into))
+            nix::unistd::chown(&path, uid.map(Into::into), gid.map(Into::into))
                 .context("failed changing file owner")?;
         }
 
         if let Some(size) = size {
             if size == 0 {
-                nix::unistd::truncate(path, FileHeader::LEN as libc::off_t)
+                nix::unistd::truncate(&path, FileHeader::LEN as libc::off_t)
                     .context("failed truncating file")?;
             } else {
                 // TODO: last block needs to be re-encrypted after truncation
@@ -89,7 +89,7 @@ impl Fuse {
         if atime.is_some() || mtime.is_some() {
             nix::sys::stat::utimensat(
                 None,
-                path,
+                &path,
                 &convert_time_spec(atime),
                 &convert_time_spec(mtime),
                 UtimensatFlags::NoFollowSymlink,
@@ -97,10 +97,23 @@ impl Fuse {
             .context("failed changing file times")?;
         }
 
-        *attr = file_attr(&path.metadata().unwrap(), attr.size, attr.blocks)
-            .context("failed getting fresh file metadata")?;
+        let meta = path.metadata().context("failed reading metadata")?;
 
-        Ok(Some(*attr))
+        let attr = if let Some(file) = self.files.get_mut(&ino) {
+            let (size, blocks) = self
+                .cipher
+                .to_plain::<BLOCK_SIZE>(meta.size() as usize - FileHeader::LEN);
+            file.attr = file_attr(&meta, (size - FileHeader::LEN) as u64, blocks as u64)
+                .context("failed getting fresh file metadata")?;
+            file.attr
+        } else if let Some(dir) = self.dirs.get_mut(&ino) {
+            dir.attr = dir_attr(&meta).context("failed getting fresh directory metadata")?;
+            dir.attr
+        } else {
+            unreachable!()
+        };
+
+        Ok(Some(attr))
     }
 
     pub(super) fn mkdir_wrapper(
@@ -109,13 +122,13 @@ impl Fuse {
         name: &OsStr,
         mode: Mode,
     ) -> Result<Option<FileAttr>> {
-        let Some(parent) = self.dirs.get_mut(&parent) else {
+        let Some(dir) = self.dirs.get(&parent) else {
             return Ok(None);
         };
 
-        let crypt_name = gocryptfs::names::encrypt(&self.master_key, &parent.iv, name)
+        let crypt_name = gocryptfs::names::encrypt(&self.master_key, &dir.iv, name)
             .context("failed encrypting dir name")?;
-        let path = parent.path.join(crypt_name);
+        let path = self.dir_path(dir).join(&crypt_name);
 
         nix::unistd::mkdir(&path, nix::sys::stat::Mode::from_bits_truncate(mode.bits()))
             .context("failed creating directory")?;
@@ -126,12 +139,17 @@ impl Fuse {
             .context("failed writing dir IV")?;
 
         let attr = dir_attr(&path.metadata().context("failed loading dir metadata")?)?;
-        parent.children.insert(attr.ino);
+        self.dirs
+            .get_mut(&parent)
+            .unwrap()
+            .children
+            .insert(attr.ino);
         self.dirs.insert(
             attr.ino,
             FuseDir {
-                path,
-                name: name.to_owned(),
+                parent,
+                crypt_name,
+                plain_name: name.to_owned(),
                 attr,
                 children: FxHashSet::default(),
                 iv: dir_iv,
@@ -146,7 +164,7 @@ impl Fuse {
             return Ok(None);
         };
 
-        fs::remove_file(&entry.path).context("failed removing file")?;
+        fs::remove_file(self.file_path(entry)).context("failed removing file")?;
 
         let entry = entry.attr.ino;
         self.dirs.get_mut(&parent).unwrap().children.remove(&entry);
@@ -160,7 +178,7 @@ impl Fuse {
             return Ok(None);
         };
 
-        fs::remove_dir(&entry.path).context("failed removing directory")?;
+        fs::remove_dir(self.dir_path(entry)).context("failed removing directory")?;
 
         let entry = entry.attr.ino;
         self.dirs.get_mut(&parent).unwrap().children.remove(&entry);
@@ -181,37 +199,41 @@ impl Fuse {
         new_parent: u64,
         new_name: &OsStr,
     ) -> Result<Option<()>> {
-        let Some(new_iv) = self.dirs.get(&new_parent).map(|p| p.iv) else {
+        let Some((new_iv, new_path)) = self.dirs.get(&new_parent).map(|p| (p.iv, self.dir_path(p)))
+        else {
             return Ok(None);
         };
 
-        let ino = if let Some(dir) = self
+        let ino = if let Some((dir, dir_path)) = self
             .find_dir(parent, name)
-            .map(|dir| dir.attr.ino)
-            .and_then(|ino| self.dirs.get_mut(&ino))
+            .map(|dir| (dir.attr.ino, self.dir_path(dir)))
+            .and_then(|(ino, path)| self.dirs.get_mut(&ino).zip(Some(path)))
         {
-            let crypt_new_name = gocryptfs::names::encrypt(&self.master_key, &new_iv, new_name)
+            let new_crypt_name = gocryptfs::names::encrypt(&self.master_key, &new_iv, new_name)
                 .context("failed encrypting new name")?;
-            let new_path = dir.path.with_file_name(crypt_new_name);
 
-            fs::rename(&dir.path, &new_path).context("failed renaming directory")?;
-            dir.path = new_path;
-            dir.name = new_name.to_owned();
+            fs::rename(dir_path, new_path.join(&new_crypt_name))
+                .context("failed renaming directory")?;
+
+            dir.parent = new_parent;
+            dir.crypt_name = new_crypt_name;
+            dir.plain_name = new_name.to_owned();
 
             dir.attr.ino
-        } else if let Some(file) = self
+        } else if let Some((file, file_path)) = self
             .find_file(parent, name)
-            .map(|file| file.attr.ino)
-            .and_then(|ino| self.files.get_mut(&ino))
+            .map(|file| (file.attr.ino, self.file_path(file)))
+            .and_then(|(ino, path)| self.files.get_mut(&ino).zip(Some(path)))
         {
-            let crypt_new_name = gocryptfs::names::encrypt(&self.master_key, &new_iv, new_name)
+            let new_crypt_name = gocryptfs::names::encrypt(&self.master_key, &new_iv, new_name)
                 .context("failed encrypting new name")?;
-            let new_path = file.path.with_file_name(crypt_new_name);
 
-            fs::rename(&file.path, &new_path).context("failed renaming file")?;
+            fs::rename(file_path, new_path.join(&new_crypt_name))
+                .context("failed renaming file")?;
+
             file.parent = new_parent;
-            file.path = new_path;
-            file.name = new_name.to_owned();
+            file.crypt_name = new_crypt_name;
+            file.plain_name = new_name.to_owned();
 
             file.attr.ino
         } else {
@@ -233,7 +255,7 @@ impl Fuse {
         let file = File::options()
             .read(true)
             .write(true)
-            .open(&file.path)
+            .open(self.file_path(file))
             .context("failed opening file")?;
 
         let fd = file.as_raw_fd() as u64;
@@ -367,14 +389,13 @@ impl Fuse {
 
         let crypt_name = gocryptfs::names::encrypt(&self.master_key, &dir.iv, name)
             .context("failed encrypting file name")?;
-        let path = dir.path.join(crypt_name);
 
         let file = File::options()
             .read(true)
             .write(true)
             .create_new(true)
             .mode(mode.bits())
-            .open(&path)
+            .open(self.dir_path(dir).join(&crypt_name))
             .context("failed creating file")?;
 
         let attr = file_attr(
@@ -392,8 +413,8 @@ impl Fuse {
             attr.ino,
             FuseFile {
                 parent,
-                path,
-                name: name.to_owned(),
+                crypt_name,
+                plain_name: name.to_owned(),
                 attr,
                 head: None,
             },

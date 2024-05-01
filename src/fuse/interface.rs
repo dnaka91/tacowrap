@@ -401,8 +401,8 @@ impl fuser::Filesystem for Fuse {
         };
 
         let base = &[
-            (dir.attr.ino, fuser::FileType::Directory, "."),
-            (dir.attr.ino, fuser::FileType::Directory, ".."),
+            (dir.attr.ino, fuser::FileType::Directory, OsStr::new(".")),
+            (dir.attr.ino, fuser::FileType::Directory, OsStr::new("..")),
         ];
 
         let dirs = dir
@@ -413,7 +413,7 @@ impl fuser::Filesystem for Fuse {
                 (
                     dir.attr.ino,
                     fuser::FileType::Directory,
-                    dir.name.to_str().unwrap(),
+                    dir.plain_name.as_os_str(),
                 )
             });
 
@@ -425,7 +425,7 @@ impl fuser::Filesystem for Fuse {
                 (
                     file.attr.ino,
                     fuser::FileType::RegularFile,
-                    file.name.to_str().unwrap(),
+                    file.plain_name.as_os_str(),
                 )
             });
 
