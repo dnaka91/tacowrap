@@ -48,7 +48,7 @@ struct FuseFile {
     path: PathBuf,
     name: OsString,
     attr: FileAttr,
-    head: FileHeader,
+    head: Option<FileHeader>,
 }
 
 fn file_size(cipher: &DynCipher, meta: &std::fs::Metadata) -> (u64, u64) {
@@ -65,7 +65,8 @@ fn file_head(path: &Path) -> Result<FileHeader> {
     let mut file = std::fs::File::open(path)?;
     let mut head = [0; FileHeader::LEN];
 
-    file.read_exact(&mut head)?;
+    file.read_exact(&mut head)
+        .context("failed reading header content")?;
 
     FileHeader::read(&head).map(|v| v.0)
 }

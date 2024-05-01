@@ -279,6 +279,10 @@ impl Fuse {
             return Ok(None);
         };
 
+        let Some(head) = &file.head else {
+            return Ok(Some(vec![]));
+        };
+
         let offset = self.cipher.to_crypt::<BLOCK_SIZE>(offset);
         let size = self.cipher.to_crypt::<BLOCK_SIZE>(size);
         let block_size = BLOCK_SIZE + self.cipher.overhead();
@@ -291,7 +295,7 @@ impl Fuse {
 
         let plain = self
             .cipher
-            .decrypt(&self.master_key, &file.head, &content, offset / block_size)
+            .decrypt(&self.master_key, head, &content, offset / block_size)
             .context("failed decrypting content")?;
 
         Ok(Some(plain))
@@ -312,6 +316,17 @@ impl Fuse {
             return Ok(None);
         };
 
+        let head = match &file.head {
+            Some(head) => head,
+            None => {
+                let head = FileHeader::new();
+                f.write_all_at(&head.to_array(), 0)
+                    .context("failed writing header")?;
+
+                file.head.insert(head)
+            }
+        };
+
         let crypt_offset = self.cipher.to_crypt::<BLOCK_SIZE>(offset);
         let block_size = BLOCK_SIZE + self.cipher.overhead();
 
@@ -323,7 +338,7 @@ impl Fuse {
             let block_offset = crypt_offset / block_size * i;
             let ciphertext = self
                 .cipher
-                .encrypt(&self.master_key, &file.head, chunk, block_offset)
+                .encrypt(&self.master_key, head, chunk, block_offset)
                 .context("failed encrypting content")?;
 
             f.write_all_at(&ciphertext, (FileHeader::LEN + block_offset) as u64)
@@ -336,12 +351,7 @@ impl Fuse {
         if rem > 0 {
             let ciphertext = self
                 .cipher
-                .encrypt(
-                    &self.master_key,
-                    &file.head,
-                    &data[data.len() - rem..],
-                    blocks,
-                )
+                .encrypt(&self.master_key, head, &data[data.len() - rem..], blocks)
                 .context("failed encrypting content")?;
 
             f.write_all_at(
@@ -380,18 +390,13 @@ impl Fuse {
             .context("failed encrypting file name")?;
         let path = dir.path.join(crypt_name);
 
-        let mut file = File::options()
+        let file = File::options()
             .read(true)
             .write(true)
             .create_new(true)
             .mode(mode.bits())
             .open(&path)
             .context("failed creating file")?;
-        let head = FileHeader::new();
-
-        file.write_all(&head.to_array())
-            .context("failed writing file header")?;
-        file.flush().context("failed flushing file content")?;
 
         let attr = file_attr(
             &file.metadata().context("failed reading file metadata")?,
@@ -411,7 +416,7 @@ impl Fuse {
                 path,
                 name: name.to_owned(),
                 attr,
-                head,
+                head: None,
             },
         );
 
