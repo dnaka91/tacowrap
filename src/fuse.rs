@@ -557,8 +557,6 @@ impl Fuse {
         let rem = data[offset % BLOCK_SIZE..].len() % BLOCK_SIZE;
 
         if rem > 0 {
-            trace!(blocks, rem, crypt_offset, block_size; "meep");
-
             let ciphertext = self
                 .cipher
                 .encrypt(
@@ -577,9 +575,11 @@ impl Fuse {
         }
 
         let meta = f.metadata().context("failed reading metadata")?;
-        let (size, blocks) = self.cipher.to_plain::<BLOCK_SIZE>(meta.size() as usize);
+        let (size, blocks) = self
+            .cipher
+            .to_plain::<BLOCK_SIZE>(meta.size() as usize - FileHeader::LEN);
 
-        file.attr = file_attr(&meta, size as u64, blocks as u64)?;
+        file.attr = file_attr(&meta, (size - FileHeader::LEN) as u64, blocks as u64)?;
 
         Ok(Some(data.len() as u32))
     }
