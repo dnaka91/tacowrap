@@ -26,7 +26,7 @@ export default defineConfig({
   head: [
     ["link", { rel: "icon", type: "image/svg+xml", href: "/tacowrap/logo.svg" }],
     ["meta", { name: "color-scheme", content: "dark light" }],
-    ["meta", { name: "theme-color", content: "#d95a00" }],
+    ["meta", { name: "theme-color", content: "#00d948" }],
     ["meta", { name: "og:type", content: "website" }],
     ["meta", { name: "og:locale", content: "en" }],
     ["meta", { name: "og:site_name", content: "Tacowrap" }],
