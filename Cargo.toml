@@ -12,7 +12,7 @@ aes-siv = { version = "0.7.0", features = ["std"] }
 anstream = "0.6.13"
 anstyle = "1.0.6"
 anyhow = "1.0.82"
-base64 = "0.22.0"
+base64 = "0.22.1"
 bitflags = "2.5.0"
 block-padding = { version = "0.3.3", features = ["std"] }
 chacha20poly1305 = { version = "0.10.1", features = ["std"] }
@@ -24,7 +24,7 @@ eme-mode = { version = "0.3.1", features = ["std", "zeroize"] }
 flume = { version = "0.11.0", default-features = false, features = ["select"] }
 fuser = { version = "0.14.0", features = ["abi-7-31"] }
 hkdf = { version = "0.12.4", features = ["std"] }
-libc = "0.2.153"
+libc = "0.2.154"
 log = { version = "0.4.21", features = ["release_max_level_info", "kv_std"] }
 nix = { version = "0.28.0", features = ["user", "fs"] }
 rand = "0.8.5"
