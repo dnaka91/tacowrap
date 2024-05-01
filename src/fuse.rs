@@ -14,7 +14,7 @@ use anyhow::{ensure, Context, Result};
 use bitflags::bitflags;
 use fuser::FileAttr;
 use libc::c_int;
-use log::{debug, error, trace, warn};
+use log::{debug, error, warn};
 use nix::{
     errno::Errno,
     sys::{

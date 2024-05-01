@@ -3,11 +3,12 @@
 use std::io::Write;
 
 use anstyle::{AnsiColor, Color, Style};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{
     kv::{self, Key, Value, VisitSource, VisitValue},
     LevelFilter, Log,
 };
+use time::{OffsetDateTime, UtcOffset};
 
 /// Initialize the logger.
 ///
@@ -18,11 +19,15 @@ use log::{
 /// Will return an `Err` if another logger instance has been set with [`log::set_boxed_logger`]
 /// already.
 pub fn init() -> Result<()> {
+    let offset = UtcOffset::current_local_offset().context("failed determining local offset")?;
+
     log::set_max_level(LevelFilter::Trace);
-    log::set_boxed_logger(Box::new(Logger)).map_err(Into::into)
+    log::set_boxed_logger(Box::new(Logger { offset })).map_err(Into::into)
 }
 
-struct Logger;
+struct Logger {
+    offset: UtcOffset,
+}
 
 const NAMES: &[&str] = &[env!("CARGO_CRATE_NAME")];
 const PREFIXES: &[&str] = &[concat!(env!("CARGO_CRATE_NAME"), "::")];
@@ -38,6 +43,7 @@ impl Log for Logger {
     fn log(&self, record: &log::Record<'_>) {
         static BRACKET_STYLE: Style = Style::new().dimmed();
         static TARGET_STYLE: Style = Style::new().bold();
+        static TIME_STYLE: Style = Style::new().dimmed();
 
         if !self.enabled(record.metadata()) {
             return;
@@ -53,10 +59,18 @@ impl Log for Logger {
         let lvl_style = lvl_style.on_default();
 
         let mut out = anstream::stderr().lock();
+        let time = OffsetDateTime::now_utc().to_offset(self.offset);
 
         let _ = write!(
             &mut out,
-            "{open_bracket}{level}{close_bracket} {target}: {args}",
+            "{time} {open_bracket}{level}{close_bracket} {target}: {args}",
+            time = format_args!(
+                "{TIME_STYLE}{:02}:{:02}:{:02}.{:03}{TIME_STYLE:#}",
+                time.hour(),
+                time.minute(),
+                time.second(),
+                time.millisecond(),
+            ),
             open_bracket = format_args!("{BRACKET_STYLE}[{BRACKET_STYLE:#}"),
             close_bracket = format_args!("{BRACKET_STYLE}]{BRACKET_STYLE:#}"),
             level = format_args!("{lvl_style}{lvl:5}{lvl_style:#}"),
