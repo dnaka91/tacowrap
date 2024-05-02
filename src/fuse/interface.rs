@@ -2,9 +2,9 @@ use std::{ffi::OsStr, io::Write, path::Path, time::Duration};
 
 use libc::c_int;
 use log::{debug, error};
-use nix::errno::Errno;
+use nix::{errno::Errno, fcntl::OFlag, sys::stat::Mode};
 
-use super::{Fuse, Mode, OpenFlags, WriteFlags};
+use super::{Fuse, WriteFlags};
 use crate::gocryptfs::content::BLOCK_SIZE;
 
 const TTL: Duration = Duration::from_secs(1);
@@ -248,7 +248,7 @@ impl fuser::Filesystem for Fuse {
     }
 
     fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
-        let flags = OpenFlags::from_bits_truncate(flags);
+        let flags = OFlag::from_bits_truncate(flags);
         debug!(ino, flags:?; "open");
 
         match self.open_wrapper(ino) {
@@ -272,7 +272,7 @@ impl fuser::Filesystem for Fuse {
         lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
-        debug!(ino, fh, offset, size, flags:? = OpenFlags::from_bits_truncate(flags), lock_owner; "read");
+        debug!(ino, fh, offset, size, flags:? = OFlag::from_bits_truncate(flags), lock_owner; "read");
 
         match self.read_wrapper(ino, offset as usize, size as usize) {
             Ok(Some(data)) => reply.data(&data),
@@ -302,7 +302,7 @@ impl fuser::Filesystem for Fuse {
             offset,
             data_len = data.len(),
             write_flags:? = WriteFlags::from_bits_truncate(write_flags),
-            flags:? = OpenFlags::from_bits_truncate(flags),
+            flags:? = OFlag::from_bits_truncate(flags),
             lock_owner;
             "write",
         );
@@ -347,7 +347,7 @@ impl fuser::Filesystem for Fuse {
         flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
-        debug!(ino, fh, flags:? = OpenFlags::from_bits_truncate(flags), lock_owner, flush; "release");
+        debug!(ino, fh, flags:? = OFlag::from_bits_truncate(flags), lock_owner, flush; "release");
 
         match self.handles.remove(&ino) {
             Some(mut handle) if flush => match handle.flush() {
@@ -381,7 +381,7 @@ impl fuser::Filesystem for Fuse {
         flags: i32,
         reply: fuser::ReplyOpen,
     ) {
-        debug!(ino, flags:? = OpenFlags::from_bits_truncate(flags); "opendir");
+        debug!(ino, flags:? = OFlag::from_bits_truncate(flags); "opendir");
         reply.opened(0, 0);
     }
 
@@ -465,7 +465,7 @@ impl fuser::Filesystem for Fuse {
         flags: i32,
         reply: fuser::ReplyEmpty,
     ) {
-        debug!(ino, fh, flags:? = OpenFlags::from_bits_truncate(flags); "releasedir");
+        debug!(ino, fh, flags:? = OFlag::from_bits_truncate(flags); "releasedir");
         reply.ok();
     }
 
@@ -502,7 +502,7 @@ impl fuser::Filesystem for Fuse {
         reply: fuser::ReplyCreate,
     ) {
         let mode = Mode::from_bits_truncate(mode);
-        let flags = OpenFlags::from_bits_truncate(flags);
+        let flags = OFlag::from_bits_truncate(flags);
         debug!(parent, name:?, mode:?, umask, flags:?; "create");
 
         match self.create_wrapper(parent, name, mode) {

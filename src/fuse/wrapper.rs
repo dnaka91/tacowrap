@@ -9,12 +9,12 @@ use anyhow::{ensure, Context, Result};
 use fuser::FileAttr;
 use log::warn;
 use nix::sys::{
-    stat::{FchmodatFlags, UtimensatFlags},
+    stat::{FchmodatFlags, Mode, UtimensatFlags},
     time::TimeSpec,
 };
 use rustc_hash::FxHashSet;
 
-use super::{dir_attr, file_attr, Fuse, FuseDir, FuseFile, Mode};
+use super::{dir_attr, file_attr, Fuse, FuseDir, FuseFile};
 use crate::gocryptfs::{
     self,
     content::{FileHeader, BLOCK_SIZE},
@@ -61,13 +61,8 @@ impl Fuse {
         };
 
         if let Some(mode) = mode {
-            nix::sys::stat::fchmodat(
-                None,
-                &path,
-                nix::sys::stat::Mode::from_bits_truncate(mode.bits()),
-                FchmodatFlags::NoFollowSymlink,
-            )
-            .context("failed changing file mode")?;
+            nix::sys::stat::fchmodat(None, &path, mode, FchmodatFlags::NoFollowSymlink)
+                .context("failed changing file mode")?;
         }
 
         if uid.is_some() || gid.is_some() {
@@ -130,8 +125,7 @@ impl Fuse {
             .context("failed encrypting dir name")?;
         let path = self.dir_path(dir).join(&crypt_name);
 
-        nix::unistd::mkdir(&path, nix::sys::stat::Mode::from_bits_truncate(mode.bits()))
-            .context("failed creating directory")?;
+        nix::unistd::mkdir(&path, mode).context("failed creating directory")?;
 
         let dir_iv = gocryptfs::names::create_iv();
 

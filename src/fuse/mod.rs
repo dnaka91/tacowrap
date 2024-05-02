@@ -281,78 +281,6 @@ fn read_dir_recursive(
 
 bitflags! {
     #[derive(Clone, Copy, Debug)]
-    struct OpenFlags: i32 {
-        /// Open as read-only, mutually exclusive with [`Self::WRONLY`] and [`Self::RDWR`].
-        const RDONLY = libc::O_RDONLY;
-        /// Open as write-only, mutually exclusive with [`Self::RDONLY`] and [`Self::RDWR`].
-        const WRONLY = libc::O_WRONLY;
-        /// Open as read/write, mutually exclusive with [`Self::RDONLY`] and [`Self::WRONLY`].
-        const RDWR = libc::O_RDWR;
-
-        const APPEND = libc::O_APPEND;
-        const ASYNC = libc::O_ASYNC;
-        const CLOEXEC = libc::O_CLOEXEC;
-        const CREAT = libc::O_CREAT;
-        const DIRECT = libc::O_DIRECT;
-        const DIRECTORY = libc::O_DIRECTORY;
-        const DSYNC = libc::O_DSYNC;
-        const EXCL = libc::O_EXCL;
-        const LARGEFILE = libc::O_LARGEFILE;
-        const NOATIME = libc::O_NOATIME;
-        const NOCTTY = libc::O_NOCTTY;
-        const NOFOLLOW = libc::O_NOFOLLOW;
-        const NONBLOCK = libc::O_NONBLOCK;
-        const NDELAY = libc::O_NDELAY;
-        const PATH = libc::O_PATH;
-        const SYNC = libc::O_SYNC;
-        const TMPFILE = libc::O_TMPFILE;
-        const TRUNC = libc::O_TRUNC;
-    }
-}
-
-bitflags! {
-    /// File mode flags that define access rights as well as special bits.
-    #[derive(Clone, Copy, Debug)]
-    #[cfg_attr(test, derive(PartialEq))]
-    struct Mode: u32 {
-        /// User (file owner) has read, write, and execute permission.
-        const USR_RWX = libc::S_IRWXU;
-        /// User has read permission.
-        const USR_R = libc::S_IRUSR;
-        /// User has write permission.
-        const USR_W = libc::S_IWUSR;
-        /// User has execute permission.
-        const USR_X = libc::S_IXUSR;
-
-        /// Group has read, write, and execute permission.
-        const GRP_RWX = libc::S_IRWXG;
-        /// Group has read permission.
-        const GRP_R = libc::S_IRGRP;
-        /// Group has write permission.
-        const GRP_W = libc::S_IWGRP;
-        /// Group has execute permission.
-        const GRP_X = libc::S_IXGRP;
-
-        /// Others have read, write, and execute permission.
-        const OTH_RWX = libc::S_IRWXO;
-        /// Others have read permission.
-        const OTH_R = libc::S_IROTH;
-        /// Others have write permission.
-        const OTH_W = libc::S_IWOTH;
-        /// Others have execute permission.
-        const OTH_X = libc::S_IXOTH;
-
-        /// Set-user-ID bit.
-        const SET_UID = libc::S_ISUID;
-        /// Set-group-ID bit.
-        const SET_GID = libc::S_ISGID;
-        /// Sticky bit.
-        const STICKY = libc::S_ISVTX;
-    }
-}
-
-bitflags! {
-    #[derive(Clone, Copy, Debug)]
     struct WriteFlags: u32 {
         /// Delayed write from page cache, file handle is guessed.
         const CACHE = fuser::consts::FUSE_WRITE_CACHE;
@@ -401,18 +329,4 @@ fn file_attr(meta: &Metadata, size: u64, blocks: u64) -> Result<FileAttr> {
         blksize: BLOCK_SIZE as u32,
         flags: 0,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mode_matches() {
-        assert_eq!(Mode::USR_RWX, Mode::USR_R | Mode::USR_W | Mode::USR_X);
-        assert_eq!(Mode::GRP_RWX, Mode::GRP_R | Mode::GRP_W | Mode::GRP_X);
-        assert_eq!(Mode::OTH_RWX, Mode::OTH_R | Mode::OTH_W | Mode::OTH_X);
-
-        assert_eq!(0o7777, Mode::all().bits());
-    }
 }
