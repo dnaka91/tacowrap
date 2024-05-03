@@ -216,7 +216,7 @@ impl Fuse {
 
             dir.parent = new_parent;
             dir.crypt_name = new_crypt_name;
-            dir.plain_name = new_name.to_owned();
+            new_name.clone_into(&mut dir.plain_name);
 
             dir.attr.ino
         } else if let Some((file, file_path)) = self
@@ -232,7 +232,7 @@ impl Fuse {
 
             file.parent = new_parent;
             file.crypt_name = new_crypt_name;
-            file.plain_name = new_name.to_owned();
+            new_name.clone_into(&mut file.plain_name);
 
             file.attr.ino
         } else {

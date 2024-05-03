@@ -263,7 +263,7 @@ fn read_dir_recursive(
     base.push(&dir.crypt_name);
 
     let (mut found_dirs, found_files, children) =
-        read_dir(master_key, cipher, (dir.attr.ino, &base, dir.iv))
+        read_dir(master_key, cipher, (dir.attr.ino, base, dir.iv))
             .context("failed reading directory")?;
 
     for dir in found_dirs.values_mut() {
