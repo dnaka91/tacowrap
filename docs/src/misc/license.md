@@ -1,1 +1,5 @@
-../../../LICENSE.md
+---
+title: License
+---
+
+<!--@include: ../../../LICENSE.md-->

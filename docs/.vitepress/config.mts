@@ -1,4 +1,5 @@
 import { defineConfig } from "vitepress";
+import { generateSidebar } from "vitepress-sidebar";
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
@@ -43,23 +44,15 @@ export default defineConfig({
       { text: "Examples", link: "/markdown-examples" },
     ],
 
-    sidebar: [
-      {
-        text: "Examples",
-        items: [
-          { text: "Markdown Examples", link: "/markdown-examples" },
-          { text: "Runtime API Examples", link: "/api-examples" },
-        ],
-      },
-      {
-        text: "Miscellaneous",
-        items: [
-          { text: "Team", link: "/misc/team" },
-          { text: "License", link: "/misc/license" },
-          { text: "Changelog", link: "/misc/changelog" },
-        ],
-      },
-    ],
+    sidebar: generateSidebar({
+      capitalizeFirst: true,
+      documentRootPath: "src",
+      sortMenusByName: true,
+
+      useFolderTitleFromIndexFile: true,
+      useTitleFromFileHeading: true,
+      useTitleFromFrontmatter: true,
+    }),
 
     outline: "deep",
 
